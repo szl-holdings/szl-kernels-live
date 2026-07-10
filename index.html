@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>szl-kernels-live — governed-kernel suite hub</title>
+<meta name="description" content="Live hub of the SZL governed-kernel holograms. Each tile's LIVE/ROADMAP status is fetched from the Hugging Face Spaces API in YOUR browser at page load — a roadmap item only shows LIVE when its Space really runs."/>
+<style>
+:root{--c:#3af4c8;--dim:#1b8f78;--bg:#000;--panel:#04100d;--warn:#ffb454;--bad:#ff5c6c;--txt:#bfeee2;}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--txt);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.55}
+a{color:var(--c);text-decoration:none}
+a:hover{color:#fff}
+.wrap{max-width:1040px;margin:0 auto;padding:30px 18px 80px}
+.glow{text-shadow:0 0 8px rgba(58,244,200,.55)}
+h1{font-size:clamp(24px,5vw,40px);margin:.15em 0;color:var(--c)}
+.sub{color:var(--dim);font-size:13px}
+.legend{margin:16px 0 8px;font-size:12.5px;color:var(--dim)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-top:14px}
+.tile{border:1px solid rgba(58,244,200,.22);border-radius:8px;padding:16px;background:linear-gradient(180deg,rgba(58,244,200,.05),rgba(0,0,0,0));display:flex;flex-direction:column;min-height:172px;transition:box-shadow .2s,border-color .2s}
+.tile.live{border-color:rgba(58,244,200,.5)}
+.tile.live:hover{box-shadow:0 0 18px rgba(58,244,200,.28)}
+.tile.roadmap{opacity:.82;border-style:dashed}
+.tile h3{margin:0 0 2px;font-size:16px;color:#fff}
+.tile .desc{font-size:12.5px;color:var(--txt);flex:1;margin:8px 0}
+.badge{display:inline-block;padding:3px 9px;border:1px solid var(--dim);border-radius:3px;font-size:11px}
+.badge.live{border-color:var(--c);color:var(--c);box-shadow:0 0 10px rgba(58,244,200,.25)}
+.badge.roadmap{border-color:var(--warn);color:var(--warn)}
+.badge.unk{border-color:var(--bad);color:var(--bad)}
+.badge.pending{border-color:var(--dim);color:var(--dim)}
+.tile .links{font-size:12px;margin-top:8px}
+.tile .links a{border-bottom:1px dotted var(--dim);margin-right:12px}
+.count{font-size:13px;margin:10px 0;color:var(--c)}
+.foot{margin-top:40px;color:var(--dim);font-size:11.5px;border-top:1px solid rgba(58,244,200,.15);padding-top:14px}
+.foot a{border-bottom:1px dotted var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 class="glow">szl-kernels-live</h1>
+  <div class="sub">the governed-kernel suite hub — one page for every live SZL kernel hologram</div>
+  <p class="legend">
+    Status is fetched from the <b>Hugging Face Spaces API</b> in <b>your</b> browser at page load
+    (<span class="badge">REPORTED</span>). A tile only shows
+    <span class="badge live">LIVE</span> when its Space runtime is actually <code>RUNNING</code>;
+    otherwise it is honest <span class="badge roadmap">ROADMAP</span>.
+    If the API can't be reached, the tile says <span class="badge unk">UNKNOWN</span> — never a fake green.
+  </p>
+  <div class="count" id="count">querying Hugging Face…</div>
+  <div class="grid" id="grid"></div>
+
+  <div class="foot">
+    Backing kernels (Hugging Face models):
+    <a href="https://huggingface.co/SZLHOLDINGS/szl-kernels" target="_blank" rel="noopener">szl-kernels</a> ·
+    <a href="https://huggingface.co/SZLHOLDINGS/szl-provctl" target="_blank" rel="noopener">szl-provctl</a> ·
+    <a href="https://huggingface.co/SZLHOLDINGS/szl-govsign" target="_blank" rel="noopener">szl-govsign</a> ·
+    <a href="https://huggingface.co/SZLHOLDINGS/szl-blocked" target="_blank" rel="noopener">szl-blocked</a><br>
+    Doctrine: Λ = Conjecture 1 (advisory, never proven) · energy MEASURED-only · honest-BLOCKED surfaced · no fabricated status.<br>
+    Source: <a href="https://github.com/szl-holdings/szl-kernels-live" target="_blank" rel="noopener">github.com/szl-holdings/szl-kernels-live</a>
+  </div>
+</div>
+<script>
+(function(){
+  "use strict";
+  // The kernel holograms. Status is resolved LIVE from the HF Spaces API — never hardcoded.
+  var SPACES = [
+    {id:"szl-provctl-live", title:"provctl-live", desc:"Provenance-DAG verify hologram — re-hashes a real in-toto v1 / SLSA v1 chain in your browser, edge by edge.", kernel:"szl-provctl"},
+    {id:"energy-attest-holo", title:"energy-attest-holo", desc:"Energy-attestation posture — shows RED when meters are dead (the honesty flex) + REPORTED GB carbon intensity.", kernel:"szl-kernels"},
+    {id:"governed-norm-holo", title:"governed-norm-holo", desc:"The willay refusal classifiers, inspectable — real classifier list, trust ceiling 0.97.", kernel:"szl-governed-norm"},
+    {id:"lambda-gate-holo", title:"lambda-gate-holo", desc:"The Λ gate — Conjecture-1 explainer sourced exactly from the formula ledger; the headline IS the unproven-ness.", kernel:"szl-lambda-gate"},
+    {id:"receipt-chain-live", title:"receipt-chain-live", desc:"a11oy receipt-lake chain with in-browser SHA3 re-verification.", kernel:"szl-receipt"},
+    {id:"szl-govsign-live", title:"govsign-live", desc:"DSSE / in-toto attestation signing story — ECDSA P-256 verified in-browser via WebCrypto.", kernel:"szl-govsign"},
+    {id:"szl-blocked-live", title:"blocked-live", desc:"honest-BLOCKED as a first-class state — EU AI Act Annex IV DRAFT passed through exactly.", kernel:"szl-blocked"}
+  ];
+  var API = "https://huggingface.co/api/spaces/SZLHOLDINGS/";
+  var grid = document.getElementById("grid");
+  var els = {};
+
+  function tile(s){
+    var el = document.createElement("div");
+    el.className = "tile roadmap";
+    el.innerHTML =
+      '<div><span class="badge pending" data-st>querying…</span></div>'
+      +'<h3>'+s.title+'</h3>'
+      +'<div class="desc">'+s.desc+'</div>'
+      +'<div class="links" data-links>'
+        +'<a href="https://huggingface.co/SZLHOLDINGS/'+s.kernel+'" target="_blank" rel="noopener">kernel ↗</a>'
+      +'</div>';
+    grid.appendChild(el);
+    els[s.id] = el;
+    return el;
+  }
+  SPACES.forEach(tile);
+
+  var live=0, road=0, unk=0, done=0;
+  function tally(){
+    document.getElementById("count").textContent =
+      live+" LIVE · "+road+" ROADMAP"+(unk? (" · "+unk+" UNKNOWN"):"")+"  (of "+SPACES.length+", reported by HF)";
+  }
+
+  SPACES.forEach(function(s){
+    var el = els[s.id];
+    var st = el.querySelector("[data-st]");
+    var links = el.querySelector("[data-links]");
+    fetch(API + s.id, {headers:{"Accept":"application/json"}})
+      .then(function(r){ if(!r.ok){ throw new Error("HTTP "+r.status); } return r.json(); })
+      .then(function(j){
+        var stage = (j && j.runtime && j.runtime.stage) ? j.runtime.stage : "NO-RUNTIME";
+        if(stage === "RUNNING"){
+          live++; el.className="tile live";
+          st.className="badge live"; st.textContent="LIVE · RUNNING";
+          links.insertAdjacentHTML("afterbegin",
+            '<a href="https://szlholdings-'+s.id+'.hf.space" target="_blank" rel="noopener">open ↗</a>');
+        } else {
+          road++; el.className="tile roadmap";
+          st.className="badge roadmap"; st.textContent="ROADMAP · "+stage;
+        }
+      })
+      .catch(function(e){
+        // Space may not exist yet (404) or API unreachable — both honest, never faked green.
+        var msg = (""+e.message).indexOf("404")>=0 ? "ROADMAP · not yet created" : "UNKNOWN · "+e.message;
+        if(msg.indexOf("ROADMAP")===0){ road++; st.className="badge roadmap"; }
+        else { unk++; st.className="badge unk"; }
+        el.className="tile roadmap"; st.textContent=msg;
+      })
+      .finally(function(){ done++; tally(); });
+  });
+  tally();
+})();
+</script>
+</body>
+</html>
