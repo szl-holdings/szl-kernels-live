@@ -1,0 +1,96 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/szl-kernels",
+  "title": "Unified governed-kernel suite",
+  "summary": "Cross-kernel CPU suite for normalization, advisory Lambda gating, energy honesty, and receipt chaining.",
+  "revision": "06cc46f9733a844ee1c4cab558b06b3bd2d377ea",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-kernels/tree/06cc46f9733a844ee1c4cab558b06b3bd2d377ea/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 182,
+        "git_oid": "24b0b7f5eee2163491aea065d85260fedafee2dc",
+        "sha256": "646a38d97dfc43ae2e106b08e29278869bbe6fd6f860326eb943ee5a9220eccb"
+      },
+      {
+        "path": "build/torch-cpu/szl_kernels/__init__.py",
+        "size": 11363,
+        "git_oid": "6c0496ccedc3f016432dd8ed571250d9985f2247",
+        "sha256": "2985924bcc448aa9d54ae0273aa8e85a739fc98433415aaef2a868d144a095fb"
+      },
+      {
+        "path": "build/torch-cpu/szl_kernels/_chain.py",
+        "size": 11754,
+        "git_oid": "739f722fe59b56ec5b251c944012b157825ff063",
+        "sha256": "daa0e96ca4175f619f05704bb0c328b85237e0690666508b87b1ffe9a2460f28"
+      },
+      {
+        "path": "build/torch-cpu/szl_kernels/_ops.py",
+        "size": 9079,
+        "git_oid": "69ee5d570a9b91db4c037c89ee9ed32acb57729e",
+        "sha256": "e2ebb90d1a8e5c6a76914a3b44b267ae6d1fafb1d754dd69293a05abd6c40ebf"
+      }
+    ],
+    "tree_digest_sha256": "476a8e5db423726f297473afad1df2f76bdbdc74d5aced86ad94572f0cf82892"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-kernels\", revision=\"06cc46f9733a844ee1c4cab558b06b3bd2d377ea\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "szl_kernels"
+    ],
+    "dependencies": [
+      "torch"
+    ],
+    "optional_dependencies": [],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "selfcheck",
+    "package": "szl_kernels",
+    "call": "selfcheck",
+    "kwargs": {},
+    "required_truthy": [
+      "ok",
+      "checks.tamper_detected",
+      "checks.energy_honest"
+    ]
+  },
+  "source_binding": {
+    "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+    "repository": null,
+    "revision": null,
+    "path": null
+  },
+  "limitations": [
+    "The bundled self-check is a functional check, not a throughput or accuracy benchmark.",
+    "Hugging Face declares no CUDA or ROCm driver family for this artifact.",
+    "Cross-kernel receipts have not been independently audited."
+  ],
+  "deprecation": {
+    "status": "FLAGSHIP_EXPERIMENTAL",
+    "replacement": null
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "szl_kernels"
+  }
+}

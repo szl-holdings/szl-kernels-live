@@ -1,0 +1,80 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/szl-invariants",
+  "title": "Executable receipt invariants",
+  "summary": "Eight falsifiable checks over receipt and ledger JSONL with explicit HOLDS, VIOLATED, and UNAVAILABLE states.",
+  "revision": "dd0e27ab9e26c2497bd44a025d6539aada83d58e",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-invariants/tree/dd0e27ab9e26c2497bd44a025d6539aada83d58e/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 188,
+        "git_oid": "05afc9cc39b49d5805426b797eeabfea614d9ee1",
+        "sha256": "63bb7fff70313674bb1c0f39a6e9ae9ad5bbe627acb27d2c282ae077cf6f42d4"
+      },
+      {
+        "path": "build/torch-cpu/szl_invariants/__init__.py",
+        "size": 33412,
+        "git_oid": "15478633d83a5941ccc7dca9f4c5225610aedfcd",
+        "sha256": "18f7c2a055e9bcd57981762ba3cb42acd0db2a7b92bf56b187706dc9755e93ff"
+      }
+    ],
+    "tree_digest_sha256": "d1351cf32c904af8aa6543d8290cb374719f5043294a2ed1e71515e02b284741"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-invariants\", revision=\"dd0e27ab9e26c2497bd44a025d6539aada83d58e\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "szl_invariants"
+    ],
+    "dependencies": [],
+    "optional_dependencies": [],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "selfcheck",
+    "package": "szl_invariants",
+    "call": "selfcheck",
+    "kwargs": {},
+    "required_truthy": [
+      "falsifiable_demonstrated"
+    ]
+  },
+  "source_binding": {
+    "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+    "repository": null,
+    "revision": null,
+    "path": null
+  },
+  "limitations": [
+    "Executable checks are not Lean proofs.",
+    "Ed25519 checks report UNAVAILABLE without a caller-supplied public key.",
+    "Only the registered invariants are evaluated."
+  ],
+  "deprecation": {
+    "status": "ACTIVE_EXPERIMENTAL",
+    "replacement": null
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "szl_invariants"
+  }
+}

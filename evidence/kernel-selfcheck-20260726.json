@@ -1,0 +1,320 @@
+{
+  "schema_version": "1.0.0",
+  "claim_class": "MEASURED",
+  "scope": "revision-pinned CPU imports and declared probes",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "environment": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.9",
+    "architecture": "AMD64",
+    "execution_device": "CPU",
+    "torch": "2.10.0+cu128"
+  },
+  "summary": {
+    "kernels": 10,
+    "passed": 10,
+    "failed": 0
+  },
+  "results": [
+    {
+      "id": "SZLHOLDINGS/szl-govsign",
+      "revision": "8a99694472bab97b9e00bd3ef1a1fd73cfaabc4a",
+      "tree_digest_sha256": "b72769d7db5aad7448913f6d7e5f006630330f32074db80fa62b34291d2b072c",
+      "status": "PASS",
+      "imports": [
+        "szl_govsign"
+      ],
+      "probe": "selfcheck",
+      "assertions": [
+        "all_passed",
+        "tamper_detected",
+        "honest_blocked_signed_as_blocked"
+      ],
+      "result": {
+        "sign_ok": true,
+        "verify_ok": true,
+        "tamper_detected": true,
+        "honest_blocked_signed_as_blocked": true,
+        "all_passed": true
+      }
+    },
+    {
+      "id": "SZLHOLDINGS/szl-kernels",
+      "revision": "06cc46f9733a844ee1c4cab558b06b3bd2d377ea",
+      "tree_digest_sha256": "476a8e5db423726f297473afad1df2f76bdbdc74d5aced86ad94572f0cf82892",
+      "status": "PASS",
+      "imports": [
+        "szl_kernels"
+      ],
+      "probe": "selfcheck",
+      "assertions": [
+        "ok",
+        "checks.tamper_detected",
+        "checks.energy_honest"
+      ],
+      "result": {
+        "ok": true,
+        "version": "0.1.0",
+        "checks": {
+          "norm_correct": true,
+          "lambda_advisory": true,
+          "energy_honest": true,
+          "cross_kernel_verify": true,
+          "spans_three_kernels": true,
+          "offline_reverify": true,
+          "tamper_detected": true,
+          "block_forward": true
+        },
+        "chain_head": "289ae569e281110460fb9614bf6f4cdc368d4ba35725fc5025045044c993ff72",
+        "kernels_touched": [
+          "governed_norm",
+          "lambda_gate",
+          "energy_core"
+        ],
+        "tamper_detected": true,
+        "error": null
+      }
+    },
+    {
+      "id": "SZLHOLDINGS/szl-lambda-gate",
+      "revision": "47c7eb2db8859507d4115adbbff20c65de66dbb5",
+      "tree_digest_sha256": "4394832d0ee5ad70d44837ad8d5c3b756b4b32703b79ef8f2e89ae2eef9f7b6a",
+      "status": "PASS",
+      "imports": [
+        "szl_lambda_gate"
+      ],
+      "probe": "selfcheck",
+      "assertions": [
+        "all_axioms_hold",
+        "advisory"
+      ],
+      "result": {
+        "version": "0.2.0",
+        "axioms": {
+          "A1_IsMonotone": true,
+          "A2_IsHomogeneous": true,
+          "A3_IsEgyptianExact": true,
+          "A4_IsBounded": true
+        },
+        "all_axioms_hold": true,
+        "adversarial": {
+          "trials": 64,
+          "violation": null
+        },
+        "advisory": true,
+        "lambda_status": "Conjecture 1 (open) — uniqueness unproven; advisory only"
+      }
+    },
+    {
+      "id": "SZLHOLDINGS/szl-governed-norm",
+      "revision": "52ebdccd8d181e2b367387353ad87484e2d9d8b3",
+      "tree_digest_sha256": "5acdb7ee4de22ba59c5230a621174af0bf427ebafa0a531e4278f2639f54ee1a",
+      "status": "PASS",
+      "imports": [
+        "szl_governed_norm"
+      ],
+      "probe": "selfcheck",
+      "assertions": [
+        "ok",
+        "receipt_ok",
+        "checks.rms_norm",
+        "checks.layer_norm"
+      ],
+      "result": {
+        "ok": true,
+        "version": "0.2.0",
+        "checks": {
+          "rms_norm": true,
+          "layer_norm": true,
+          "fused_add_rms_norm": true,
+          "governance": true
+        },
+        "receipt_ok": true,
+        "receipt_head": "20b0f02acaf600c2934c6a4832b71392b6d0dbb0b4bf51fc2174136ce295a875",
+        "error": null
+      }
+    },
+    {
+      "id": "SZLHOLDINGS/governed-inference-meter",
+      "revision": "dd133d351d5d77ff666ce16d452edfdfdc3f1a61",
+      "tree_digest_sha256": "91fa6f4642526aeb8c7190e31993907c13e713fe4817ffff99ef4e596825a5ac",
+      "status": "PASS",
+      "imports": [
+        "governed_inference_meter"
+      ],
+      "probe": "selfcheck",
+      "assertions": [
+        "passed",
+        "deny_call_blocked",
+        "tamper_detected",
+        "joules_honest_when_unmeasured"
+      ],
+      "result": {
+        "version": "0.2.0",
+        "nvml_available": false,
+        "energy_mode_first_call": "unmeasured",
+        "joules_honest_when_unmeasured": true,
+        "tpj_honest_when_unmeasured": true,
+        "allow_call_ran": true,
+        "deny_call_blocked": true,
+        "chain_ok": true,
+        "chain_depth": 2,
+        "tamper_detected": true,
+        "preferred_energy_mode": "unmeasured",
+        "doctrine": "SZL Holdings · governed, energy-metered inference receipts · MEASURED only with NVML · policy gate is advisory (host-enforced) · Lambda = Conjecture 1 (advisory, NOT a theorem) · trust never 100% · honesty over checklist",
+        "passed": true
+      }
+    },
+    {
+      "id": "SZLHOLDINGS/szl-blocked",
+      "revision": "a6642f7346be5839049eb9a5e29361da18a12562",
+      "tree_digest_sha256": "331ba5c140edf342108be28e31abd664f067761d77185c2a9554e2f2ebe42f5b",
+      "status": "PASS",
+      "imports": [
+        "szl_blocked",
+        "szl_euaiact"
+      ],
+      "probe": "deny_default",
+      "result_type": "BlockedResult",
+      "callable_executions": 0,
+      "reason": "HARD security policy DENY: deny-by-default: no explicit hard ALLOW rule matched"
+    },
+    {
+      "id": "SZLHOLDINGS/szl-provctl",
+      "revision": "81f787f24c7b0612aea8bb7b0374afcca3ab0250",
+      "tree_digest_sha256": "c956be1390b4a8561a964e2a30d2c27c7918af7d6d927e42a524df77a9e06c50",
+      "status": "PASS",
+      "imports": [
+        "szl_provctl"
+      ],
+      "probe": "selfcheck",
+      "assertions": [
+        "ok",
+        "checks.dag_tamper_detected",
+        "checks.energy_cpu_unavailable_not_fabricated"
+      ],
+      "result": {
+        "ok": true,
+        "version": "0.1.0",
+        "checks": {
+          "statement_type": true,
+          "statement_subject_is_head": true,
+          "statement_predicate_type": true,
+          "proven_trust_locked_false": true,
+          "energy_measured_only": true,
+          "fabricated_energy_rejected": true,
+          "honest_blocked_not_flippable": true,
+          "slsa_predicate_type": true,
+          "slsa_buildType": true,
+          "slsa_resolvedDependencies": true,
+          "slsa_builder_id": true,
+          "slsa_metadata_fields": true,
+          "slsa_byproducts_head": true,
+          "dag_verifies_clean": true,
+          "dag_three_nodes": true,
+          "dag_topo_order": true,
+          "dag_blocked_surfaced": true,
+          "dag_tamper_detected": true,
+          "dag_roundtrip_ok": true,
+          "energy_kernel_ran": true,
+          "energy_named_kernel": true,
+          "energy_cpu_unavailable_not_fabricated": true,
+          "chain_still_verifies": true
+        },
+        "chain_source": "vendored(szl_provctl)",
+        "error": null
+      }
+    },
+    {
+      "id": "SZLHOLDINGS/szl-invariants",
+      "revision": "dd0e27ab9e26c2497bd44a025d6539aada83d58e",
+      "tree_digest_sha256": "d1351cf32c904af8aa6543d8290cb374719f5043294a2ed1e71515e02b284741",
+      "status": "PASS",
+      "imports": [
+        "szl_invariants"
+      ],
+      "probe": "selfcheck",
+      "assertions": [
+        "falsifiable_demonstrated"
+      ],
+      "result": {
+        "version": "0.1.0",
+        "checks_registered": 8,
+        "clean_chain_status": "HOLDS",
+        "tampered_chain_status": "VIOLATED",
+        "ed25519_without_key": "UNAVAILABLE",
+        "falsifiable_demonstrated": true,
+        "lambda_status": "Conjecture 1 (open) — untouched by these invariants"
+      }
+    },
+    {
+      "id": "SZLHOLDINGS/szl-ouroboros",
+      "revision": "756678f0bf096bde25054336c8e1ff78a9eb9172",
+      "tree_digest_sha256": "d54c273c3dc156161c748ead6d42f4b1150f512000b120b3057082cc6680e6cb",
+      "status": "PASS",
+      "imports": [
+        "szl_ouroboros"
+      ],
+      "probe": "selfcheck",
+      "assertions": [
+        "arithmetic_ok",
+        "withinBudget"
+      ],
+      "result": {
+        "version": "0.1.0",
+        "doctrine": "bounded, terminating, receipt-closed",
+        "modelMs": 1120.0,
+        "peakAttemptMs": 900.0,
+        "overheadMs": 180.0,
+        "serializationTaxMs": 220.0,
+        "deadHopMs": 220.0,
+        "withinBudget": true,
+        "arithmetic_ok": true,
+        "lambda_status": "Conjecture 1 (open) — untouched by loop-tax accounting"
+      }
+    },
+    {
+      "id": "SZLHOLDINGS/szl-formulas",
+      "revision": "39a9fe6fd295f500f30ad7c6ff4cfdf559b48c4a",
+      "tree_digest_sha256": "0fe7c1140a1d4a7a93673746497d9770a7c453a2ca17896d66b0115d9dfca08a",
+      "status": "PASS",
+      "imports": [
+        "szl_formulas"
+      ],
+      "probe": "selfcheck",
+      "assertions": [
+        "falsifiable_demonstrated",
+        "locked_count_is_eight",
+        "proof_status_covers_all"
+      ],
+      "result": {
+        "version": "0.1.0",
+        "registry_count": 21,
+        "proof_status_covers_all": true,
+        "locked_proven_count": 8,
+        "locked_proven_ids": [
+          "F1",
+          "F11",
+          "F12",
+          "F18",
+          "F19",
+          "F22",
+          "F4",
+          "F7"
+        ],
+        "locked_count_is_eight": true,
+        "clean_replay_ok": true,
+        "tamper_detected": true,
+        "falsifiable_demonstrated": true,
+        "lambda_status": "Conjecture 1 (open) — uniqueness unproven (Uniqueness.lean:120 sorry); advisory only",
+        "lambda_label": "ADVISORY — Λ = Conjecture 1 (open); non-compensatory roll-up, NOT proven trust"
+      }
+    }
+  ],
+  "limitations": [
+    "This receipt records CPU imports and functional probes, not GPU performance.",
+    "No CUDA or ROCm driver family is inferred from successful torch imports.",
+    "Self-check fixtures are not independent security or correctness audits."
+  ],
+  "payload_sha256": "4f6678528604e5421448909c20ba10f89e4e80d0c77272e3f6e6f575d2081a40"
+}

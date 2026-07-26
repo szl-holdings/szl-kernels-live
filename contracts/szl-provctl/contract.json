@@ -1,0 +1,108 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/szl-provctl",
+  "title": "Provenance controller",
+  "summary": "in-toto Statement and SLSA provenance builders with DAG verification, tamper detection, and honest energy states.",
+  "revision": "81f787f24c7b0612aea8bb7b0374afcca3ab0250",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-provctl/tree/81f787f24c7b0612aea8bb7b0374afcca3ab0250/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 182,
+        "git_oid": "2087814b38ee75b5343216ceb817d8535273334f",
+        "sha256": "63abbf675bf26fe66e111c747f41761cc82d8b0ca04dcd984b11e1f39da67603"
+      },
+      {
+        "path": "build/torch-cpu/szl_provctl/__init__.py",
+        "size": 10314,
+        "git_oid": "d090bc4b596723e676be0815c2e8ced3b57be83a",
+        "sha256": "cc4e8a2ad1087b20baa5de0182111ade30094ba8869276f51cfa38b70d56c682"
+      },
+      {
+        "path": "build/torch-cpu/szl_provctl/_chain.py",
+        "size": 5714,
+        "git_oid": "ae16d595942619d0300ea7d092d8023706ce8aee",
+        "sha256": "d4ce69176050905f131902cb63a61da72dc4a06a676df6fa26338687d9a3785d"
+      },
+      {
+        "path": "build/torch-cpu/szl_provctl/_dag.py",
+        "size": 8904,
+        "git_oid": "2633f590b29219d01c542075271ec3371681e90a",
+        "sha256": "b1b0c64de48e9354bbb4887418542e64dcf6b2c88856456921b259d617a7b697"
+      },
+      {
+        "path": "build/torch-cpu/szl_provctl/_energy.py",
+        "size": 4018,
+        "git_oid": "9e5593e75c23019c2756357312d25c953fdc2d3f",
+        "sha256": "e6d2744e9738d7afff52fd421cac7c51088916ad102a3cc44fb00b7f14517f50"
+      },
+      {
+        "path": "build/torch-cpu/szl_provctl/_interop.py",
+        "size": 9981,
+        "git_oid": "eeaea8b359fd32095edd9e7b5c7eb4d7c373f0aa",
+        "sha256": "05cf4f411360bee2cda74a3f44590a2f205d2a8d5ba43052881d6949bf7e1cd5"
+      }
+    ],
+    "tree_digest_sha256": "c956be1390b4a8561a964e2a30d2c27c7918af7d6d927e42a524df77a9e06c50"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-provctl\", revision=\"81f787f24c7b0612aea8bb7b0374afcca3ab0250\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "szl_provctl"
+    ],
+    "dependencies": [],
+    "optional_dependencies": [
+      "pynvml"
+    ],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "selfcheck",
+    "package": "szl_provctl",
+    "call": "selfcheck",
+    "kwargs": {},
+    "required_truthy": [
+      "ok",
+      "checks.dag_tamper_detected",
+      "checks.energy_cpu_unavailable_not_fabricated"
+    ]
+  },
+  "source_binding": {
+    "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+    "repository": null,
+    "revision": null,
+    "path": null
+  },
+  "limitations": [
+    "Locally valid statements are not equivalent to independent transparency-log inclusion.",
+    "No external verifier or key-distribution system is bundled.",
+    "Energy remains unavailable when no real meter is present."
+  ],
+  "deprecation": {
+    "status": "ACTIVE_EXPERIMENTAL",
+    "replacement": null
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "szl_provctl"
+  }
+}

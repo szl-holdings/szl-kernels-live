@@ -1,0 +1,81 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/szl-ouroboros",
+  "title": "Bounded Ouroboros accounting",
+  "summary": "Bounded loop-tax accounting over recorded provider attempts with terminating, receipt-closed arithmetic.",
+  "revision": "756678f0bf096bde25054336c8e1ff78a9eb9172",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-ouroboros/tree/756678f0bf096bde25054336c8e1ff78a9eb9172/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 186,
+        "git_oid": "4786eecbf7cb8ec9ae4ea23e730229ae627cd984",
+        "sha256": "23a9ddc00b6952b6ea796f5541c4d63fa9485edeb95065de70f6719ed613e90e"
+      },
+      {
+        "path": "build/torch-cpu/szl_ouroboros/__init__.py",
+        "size": 14846,
+        "git_oid": "42e31ce96d65ed205078282df8ba55f3a8041c63",
+        "sha256": "d06754c5fc50fae574d46b7a94f189be66984b612c2a08cec620e12ec59c84fc"
+      }
+    ],
+    "tree_digest_sha256": "d54c273c3dc156161c748ead6d42f4b1150f512000b120b3057082cc6680e6cb"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-ouroboros\", revision=\"756678f0bf096bde25054336c8e1ff78a9eb9172\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "szl_ouroboros"
+    ],
+    "dependencies": [],
+    "optional_dependencies": [],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "selfcheck",
+    "package": "szl_ouroboros",
+    "call": "selfcheck",
+    "kwargs": {},
+    "required_truthy": [
+      "arithmetic_ok",
+      "withinBudget"
+    ]
+  },
+  "source_binding": {
+    "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+    "repository": null,
+    "revision": null,
+    "path": null
+  },
+  "limitations": [
+    "Self-check durations are deterministic fixtures, not performance measurements.",
+    "Serialization tax is a counterfactual quantity and not a claimed saving.",
+    "The kernel does not execute providers or network calls."
+  ],
+  "deprecation": {
+    "status": "ACTIVE_EXPERIMENTAL",
+    "replacement": null
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "szl_ouroboros"
+  }
+}

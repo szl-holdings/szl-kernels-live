@@ -1,0 +1,115 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/governed-inference-meter",
+  "title": "Governed inference meter",
+  "summary": "Policy-gated inference receipts with optional NVML energy measurement and tamper-evident chaining.",
+  "revision": "dd133d351d5d77ff666ce16d452edfdfdc3f1a61",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/governed-inference-meter/tree/dd133d351d5d77ff666ce16d452edfdfdc3f1a61/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/governed_inference_meter/__init__.py",
+        "size": 11909,
+        "git_oid": "797f30020d98cf377d9d8353f3684734fcc89a2f",
+        "sha256": "26eb6c23beea51693707fa74866f9e1e169c11923edc50bc7f55fda8e8872dc9"
+      },
+      {
+        "path": "build/torch-cpu/governed_inference_meter/_attest.py",
+        "size": 9960,
+        "git_oid": "cf13e067abbcd692c8d3bc7090d5af9638836fa5",
+        "sha256": "6a3065be1e459bdd584f14189883edf287146671c87053b46748f0dd2781806e"
+      },
+      {
+        "path": "build/torch-cpu/governed_inference_meter/_energy.py",
+        "size": 9324,
+        "git_oid": "92fc2074a07842bbb0f257ce5513fdd1bae174cb",
+        "sha256": "465e3d89f351e1a62f3f5c172967800de834a638f4c63eb6a439a8933b374e93"
+      },
+      {
+        "path": "build/torch-cpu/governed_inference_meter/_policy.py",
+        "size": 3281,
+        "git_oid": "baa972ed6e0dea4a5f84463a9ef3db3f666525ea",
+        "sha256": "f5c9eac9ad57df0c2ec722fdd116fcf18c9e9c85ff043c3c2b23b5ec00f01955"
+      },
+      {
+        "path": "build/torch-cpu/governed_inference_meter/_receipt.py",
+        "size": 8408,
+        "git_oid": "61ceab521c60c7320fa715b959064418af653d52",
+        "sha256": "415450c448534ff6e491981239cd2f17775bb6c0157ded3d857c6fefb4ed9204"
+      },
+      {
+        "path": "build/torch-cpu/governed_inference_meter/_spine.py",
+        "size": 15087,
+        "git_oid": "e36ce837e7153520a24d7883467d18dd4cf67303",
+        "sha256": "4c1e0a20c4d34eef8975a7fced9dfb10bf276bd280cfe9b2c8717a9a97f644a8"
+      },
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 208,
+        "git_oid": "21ac25a7c8b336b8a4c399fd3bebd8318d93c0d9",
+        "sha256": "513c45bd6834e853a2afbaf31c672c2ef083d037ccb21feb38d928e162682a88"
+      }
+    ],
+    "tree_digest_sha256": "91fa6f4642526aeb8c7190e31993907c13e713fe4817ffff99ef4e596825a5ac"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/governed-inference-meter\", revision=\"dd133d351d5d77ff666ce16d452edfdfdc3f1a61\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "governed_inference_meter"
+    ],
+    "dependencies": [],
+    "optional_dependencies": [
+      "pynvml"
+    ],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "selfcheck",
+    "package": "governed_inference_meter",
+    "call": "selfcheck",
+    "kwargs": {},
+    "required_truthy": [
+      "passed",
+      "deny_call_blocked",
+      "tamper_detected",
+      "joules_honest_when_unmeasured"
+    ]
+  },
+  "source_binding": {
+    "status": "RELATED_GITHUB_SOURCE",
+    "repository": "szl-holdings/szl-energy-attest",
+    "revision": "14c1d8fdbb19dbd69f4dfc365d7f74d515bc4bdb",
+    "path": "szl_energy_attest"
+  },
+  "limitations": [
+    "The dedicated GitHub repository is archived; this artifact is retained for compatibility.",
+    "Energy is UNMEASURED when NVML is absent and no joule value may be inferred.",
+    "The policy gate is advisory unless the host enforces denial."
+  ],
+  "deprecation": {
+    "status": "RETAINED_COMPATIBILITY",
+    "replacement": "SZLHOLDINGS/szl-kernels"
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "governed_inference_meter"
+  }
+}

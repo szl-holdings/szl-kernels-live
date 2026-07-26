@@ -1,0 +1,101 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/szl-lambda-gate",
+  "title": "Advisory Lambda gate",
+  "summary": "Differentiable weighted geometric aggregation with empirical A1-A4 checks and a non-compensatory advisory gate.",
+  "revision": "47c7eb2db8859507d4115adbbff20c65de66dbb5",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-lambda-gate/tree/47c7eb2db8859507d4115adbbff20c65de66dbb5/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 190,
+        "git_oid": "b0e106169a71fd6db6eb64142d4d41aa1be2042c",
+        "sha256": "05cb7c2afc5f3186563d76a538ed8df78cdf1984544cc86b471df4a961ab7273"
+      },
+      {
+        "path": "build/torch-cpu/szl_lambda_gate/__init__.py",
+        "size": 6938,
+        "git_oid": "bfc187f542a4fc02ee137d4cc8ecc2e445a8ef66",
+        "sha256": "5e1354107408132a9d6bba5ab47dda1bcd195104a07f0f2428c79fdca6668e14"
+      },
+      {
+        "path": "build/torch-cpu/szl_lambda_gate/_lambda.py",
+        "size": 13381,
+        "git_oid": "95adbac51398504a61d0e22af7d59f7b9756b2fc",
+        "sha256": "3d1331ca71d2abfadfed5e141db45f5d5ad0585c9aba8a5583388376ebfc9d18"
+      },
+      {
+        "path": "build/torch-cpu/szl_lambda_gate/_ops.py",
+        "size": 367,
+        "git_oid": "5c0139798880b17b886ccac1d4ad8d08c7bb22e1",
+        "sha256": "50f0a4ee883c61018d954ccd618392826e9d84a6b1853ac2f7ccb3f73fb73359"
+      },
+      {
+        "path": "build/torch-cpu/szl_lambda_gate/layers.py",
+        "size": 1952,
+        "git_oid": "9187e9176953858856c7ff4ab098d6dd33dad569",
+        "sha256": "ff2e4f5e5fc42e59184d1d3e91724c613fd98b1028617ba47d7dbf9e5aaf825e"
+      }
+    ],
+    "tree_digest_sha256": "4394832d0ee5ad70d44837ad8d5c3b756b4b32703b79ef8f2e89ae2eef9f7b6a"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-lambda-gate\", revision=\"47c7eb2db8859507d4115adbbff20c65de66dbb5\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "szl_lambda_gate"
+    ],
+    "dependencies": [
+      "torch"
+    ],
+    "optional_dependencies": [],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "selfcheck",
+    "package": "szl_lambda_gate",
+    "call": "selfcheck",
+    "kwargs": {},
+    "required_truthy": [
+      "all_axioms_hold",
+      "advisory"
+    ]
+  },
+  "source_binding": {
+    "status": "RELATED_GITHUB_SOURCE",
+    "repository": "szl-holdings/szl-lambda-gate",
+    "revision": "8b95ca47571fda65a52b0b6189677ec089a6e503",
+    "path": "torch-ext/szl_lambda_gate"
+  },
+  "limitations": [
+    "Lambda uniqueness remains Conjecture 1 and is not proven.",
+    "The gate is advisory; a host must enforce its result.",
+    "Empirical A1-A4 checks do not substitute for the open uniqueness proof."
+  ],
+  "deprecation": {
+    "status": "ACTIVE_EXPERIMENTAL",
+    "replacement": null
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "szl_lambda_gate"
+  }
+}

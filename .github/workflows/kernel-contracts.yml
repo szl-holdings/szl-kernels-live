@@ -1,0 +1,36 @@
+name: kernel-contracts
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "19 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Verify checked contracts
+        run: python scripts/verify_kernel_registry.py
+      - name: Run fail-closed tests
+        run: python -m unittest discover -s tests -v
+
+  live-integrity:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Verify live heads and file content
+        run: python scripts/verify_kernel_registry.py --live

@@ -1,0 +1,108 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/szl-blocked",
+  "title": "Fail-closed governed call",
+  "summary": "Deny-by-default execution gate, hard security dominance, receipt chain, and Annex IV draft derivation.",
+  "revision": "a6642f7346be5839049eb9a5e29361da18a12562",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-blocked/tree/a6642f7346be5839049eb9a5e29361da18a12562/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 182,
+        "git_oid": "07a411660e3fac77b8dbbe5dc80444f144ebd0e7",
+        "sha256": "0795f18c8f92d2cff53ea99d6fbafac3b7ca6b0b7b0183fbd53a511497835b42"
+      },
+      {
+        "path": "build/torch-cpu/szl_blocked/__init__.py",
+        "size": 2956,
+        "git_oid": "2fd4706cd18a2a855f53172371bc808720704fd5",
+        "sha256": "6fb0f3903cc923ef04f88a9a43eef33c833171d7ee23371b30471217c7961c8b"
+      },
+      {
+        "path": "build/torch-cpu/szl_blocked/_chain.py",
+        "size": 6857,
+        "git_oid": "d3c2cc242f3acad7f9647cf1a83cd121de8543b9",
+        "sha256": "ce98c6e3d3ed9ae80f3ac2742e8d85aaea30768e8ad9bd3b6cda5bb9b6a346d1"
+      },
+      {
+        "path": "build/torch-cpu/szl_blocked/_gate.py",
+        "size": 18746,
+        "git_oid": "41d8fca376113b27929f555dc4e82e6cdff67a2a",
+        "sha256": "e2d85d19df4db883e857235a684ec00fedac27f841156895098a936f4a614d2a"
+      },
+      {
+        "path": "build/torch-cpu/szl_blocked/_rules.py",
+        "size": 3065,
+        "git_oid": "8f7318f09283e6ac1f8589cf64ded807aae196e0",
+        "sha256": "e1114883f44dd06fe83435d857003c24b6edd1aec4de655e1f37fec8193c923b"
+      },
+      {
+        "path": "build/torch-cpu/szl_euaiact/__init__.py",
+        "size": 1622,
+        "git_oid": "2893a657510279fade98ad617ba7d566d9536573",
+        "sha256": "03b65de1b6abc6e7de19f3676806ebaaa00b673ea0c9d3a787c9e83888e057dc"
+      },
+      {
+        "path": "build/torch-cpu/szl_euaiact/_annex_iv.py",
+        "size": 21563,
+        "git_oid": "e220618c1570faa593bfe2e69355839d5fdade3d",
+        "sha256": "6e8f4814de011c16c7e29d1877f4e282f8b41d33cfac393a87da9faa99cbffb4"
+      }
+    ],
+    "tree_digest_sha256": "331ba5c140edf342108be28e31abd664f067761d77185c2a9554e2f2ebe42f5b"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-blocked\", revision=\"a6642f7346be5839049eb9a5e29361da18a12562\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "szl_blocked",
+      "szl_euaiact"
+    ],
+    "dependencies": [],
+    "optional_dependencies": [],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "deny_default",
+    "package": "szl_blocked",
+    "required_result_type": "BlockedResult",
+    "required_callable_count": 0
+  },
+  "source_binding": {
+    "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+    "repository": null,
+    "revision": null,
+    "path": null
+  },
+  "limitations": [
+    "The Annex IV output is a draft skeleton and not legal advice.",
+    "The default-deny probe proves refusal behavior only, not policy completeness.",
+    "No independent policy audit is claimed."
+  ],
+  "deprecation": {
+    "status": "ACTIVE_EXPERIMENTAL",
+    "replacement": null
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "szl_blocked"
+  }
+}
