@@ -1,0 +1,110 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/szl-govsign",
+  "title": "Governed signature envelope",
+  "summary": "DSSE-style governance predicate signing, verification, and tamper detection.",
+  "revision": "8a99694472bab97b9e00bd3ef1a1fd73cfaabc4a",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-govsign/tree/8a99694472bab97b9e00bd3ef1a1fd73cfaabc4a/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 169,
+        "git_oid": "99b2a990d11720783556b331df1d015b1b01980e",
+        "sha256": "af35fed2e438eae5fd370ffcb65c3d2e8f093c2e7f8179fc579deea0f4f219a7"
+      },
+      {
+        "path": "build/torch-cpu/szl_govsign/__init__.py",
+        "size": 1904,
+        "git_oid": "d6bc82b139b49898f1aede8b8f8a455c76fae0a9",
+        "sha256": "2ae78794cc48efa871696820cffcd615b70f8a740af2567d5b402b18245c7287"
+      },
+      {
+        "path": "build/torch-cpu/szl_govsign/envelope.py",
+        "size": 5534,
+        "git_oid": "f942b5a286154cccbe7d11d308ea1c2d602cc701",
+        "sha256": "26310797239357b695d4bc314dced36856158e3b26d71c57112a7ab8570a4025"
+      },
+      {
+        "path": "build/torch-cpu/szl_govsign/pae.py",
+        "size": 1248,
+        "git_oid": "13cfc34050c5a9824c339c5c0c74f3f27e089e50",
+        "sha256": "40e4629102d8fc6bf34d39f6bf28a8c799985ae0478ce9499fea29d0373d8c1b"
+      },
+      {
+        "path": "build/torch-cpu/szl_govsign/predicate.py",
+        "size": 5573,
+        "git_oid": "2fdbf773ebb0d18283899343069588a87aea49aa",
+        "sha256": "535d816554342894b2713c0c7a548d441867f734ae4f4838a35bb35f6b05ddef"
+      },
+      {
+        "path": "build/torch-cpu/szl_govsign/selfcheck.py",
+        "size": 4018,
+        "git_oid": "107b459c8f74da6340332a026adfc66bcbec5801",
+        "sha256": "50a53a9e6c52ae0bdba507b6215d949d43d8d37198e38a8df7d118518198b106"
+      }
+    ],
+    "tree_digest_sha256": "b72769d7db5aad7448913f6d7e5f006630330f32074db80fa62b34291d2b072c"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-govsign\", revision=\"8a99694472bab97b9e00bd3ef1a1fd73cfaabc4a\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "szl_govsign"
+    ],
+    "dependencies": [
+      "cryptography"
+    ],
+    "optional_dependencies": [],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "selfcheck",
+    "package": "szl_govsign",
+    "call": "selfcheck",
+    "kwargs": {
+      "verbose": false
+    },
+    "required_truthy": [
+      "all_passed",
+      "tamper_detected",
+      "honest_blocked_signed_as_blocked"
+    ]
+  },
+  "source_binding": {
+    "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+    "repository": null,
+    "revision": null,
+    "path": null
+  },
+  "limitations": [
+    "Does not establish external public-key provenance.",
+    "No independent security evaluation is claimed.",
+    "ECDSA signing receipts are not a transparency-log inclusion proof."
+  ],
+  "deprecation": {
+    "status": "ACTIVE_EXPERIMENTAL",
+    "replacement": null
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "szl_govsign"
+  }
+}

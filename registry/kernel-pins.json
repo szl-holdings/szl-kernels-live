@@ -1,0 +1,294 @@
+{
+  "schema_version": "1.0.0",
+  "portfolio": "SZLHOLDINGS governed kernels",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "doctrine": {
+    "runtime_claim": "CPU import/self-check evidence only unless a contract states otherwise",
+    "lambda_status": "Conjecture 1 (open); advisory only",
+    "energy_status": "MEASURED only when a meter reports a real sample",
+    "trust_remote_code": "Required by Hugging Face Kernels; pin a full revision before loading"
+  },
+  "kernels": [
+    {
+      "id": "SZLHOLDINGS/szl-govsign",
+      "slug": "szl-govsign",
+      "title": "Governed signature envelope",
+      "summary": "DSSE-style governance predicate signing, verification, and tamper detection.",
+      "revision": "8a99694472bab97b9e00bd3ef1a1fd73cfaabc4a",
+      "packages": ["szl_govsign"],
+      "dependencies": ["cryptography"],
+      "probe": {
+        "kind": "selfcheck",
+        "package": "szl_govsign",
+        "call": "selfcheck",
+        "kwargs": {"verbose": false},
+        "required_truthy": ["all_passed", "tamper_detected", "honest_blocked_signed_as_blocked"]
+      },
+      "portfolio_status": "ACTIVE_EXPERIMENTAL",
+      "source_binding": {
+        "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+        "repository": null,
+        "revision": null,
+        "path": null
+      },
+      "limitations": [
+        "Does not establish external public-key provenance.",
+        "No independent security evaluation is claimed.",
+        "ECDSA signing receipts are not a transparency-log inclusion proof."
+      ]
+    },
+    {
+      "id": "SZLHOLDINGS/szl-kernels",
+      "slug": "szl-kernels",
+      "title": "Unified governed-kernel suite",
+      "summary": "Cross-kernel CPU suite for normalization, advisory Lambda gating, energy honesty, and receipt chaining.",
+      "revision": "06cc46f9733a844ee1c4cab558b06b3bd2d377ea",
+      "packages": ["szl_kernels"],
+      "dependencies": ["torch"],
+      "probe": {
+        "kind": "selfcheck",
+        "package": "szl_kernels",
+        "call": "selfcheck",
+        "kwargs": {},
+        "required_truthy": ["ok", "checks.tamper_detected", "checks.energy_honest"]
+      },
+      "portfolio_status": "FLAGSHIP_EXPERIMENTAL",
+      "source_binding": {
+        "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+        "repository": null,
+        "revision": null,
+        "path": null
+      },
+      "limitations": [
+        "The bundled self-check is a functional check, not a throughput or accuracy benchmark.",
+        "Hugging Face declares no CUDA or ROCm driver family for this artifact.",
+        "Cross-kernel receipts have not been independently audited."
+      ]
+    },
+    {
+      "id": "SZLHOLDINGS/szl-lambda-gate",
+      "slug": "szl-lambda-gate",
+      "title": "Advisory Lambda gate",
+      "summary": "Differentiable weighted geometric aggregation with empirical A1-A4 checks and a non-compensatory advisory gate.",
+      "revision": "47c7eb2db8859507d4115adbbff20c65de66dbb5",
+      "packages": ["szl_lambda_gate"],
+      "dependencies": ["torch"],
+      "probe": {
+        "kind": "selfcheck",
+        "package": "szl_lambda_gate",
+        "call": "selfcheck",
+        "kwargs": {},
+        "required_truthy": ["all_axioms_hold", "advisory"]
+      },
+      "portfolio_status": "ACTIVE_EXPERIMENTAL",
+      "source_binding": {
+        "status": "RELATED_GITHUB_SOURCE",
+        "repository": "szl-holdings/szl-lambda-gate",
+        "revision": "8b95ca47571fda65a52b0b6189677ec089a6e503",
+        "path": "torch-ext/szl_lambda_gate"
+      },
+      "limitations": [
+        "Lambda uniqueness remains Conjecture 1 and is not proven.",
+        "The gate is advisory; a host must enforce its result.",
+        "Empirical A1-A4 checks do not substitute for the open uniqueness proof."
+      ]
+    },
+    {
+      "id": "SZLHOLDINGS/szl-governed-norm",
+      "slug": "szl-governed-norm",
+      "title": "Governed normalization",
+      "summary": "RMSNorm, LayerNorm, fused add plus RMSNorm, optional governance axes, and hash-chained receipts.",
+      "revision": "52ebdccd8d181e2b367387353ad87484e2d9d8b3",
+      "packages": ["szl_governed_norm"],
+      "dependencies": ["torch"],
+      "probe": {
+        "kind": "selfcheck",
+        "package": "szl_governed_norm",
+        "call": "selfcheck",
+        "kwargs": {},
+        "required_truthy": ["ok", "receipt_ok", "checks.rms_norm", "checks.layer_norm"]
+      },
+      "portfolio_status": "RETAINED_COMPATIBILITY",
+      "source_binding": {
+        "status": "RELATED_GITHUB_SOURCE",
+        "repository": "szl-holdings/szl-lambda-gate",
+        "revision": "8b95ca47571fda65a52b0b6189677ec089a6e503",
+        "path": "torch-ext/szl_lambda_gate/governed_norm"
+      },
+      "limitations": [
+        "The dedicated GitHub repository is archived; this artifact is retained for compatibility.",
+        "Only CPU import and functional self-check evidence is recorded here.",
+        "No CUDA, ROCm, latency, or numerical-stability benchmark is claimed."
+      ]
+    },
+    {
+      "id": "SZLHOLDINGS/governed-inference-meter",
+      "slug": "governed-inference-meter",
+      "title": "Governed inference meter",
+      "summary": "Policy-gated inference receipts with optional NVML energy measurement and tamper-evident chaining.",
+      "revision": "dd133d351d5d77ff666ce16d452edfdfdc3f1a61",
+      "packages": ["governed_inference_meter"],
+      "dependencies": [],
+      "optional_dependencies": ["pynvml"],
+      "probe": {
+        "kind": "selfcheck",
+        "package": "governed_inference_meter",
+        "call": "selfcheck",
+        "kwargs": {},
+        "required_truthy": ["passed", "deny_call_blocked", "tamper_detected", "joules_honest_when_unmeasured"]
+      },
+      "portfolio_status": "RETAINED_COMPATIBILITY",
+      "source_binding": {
+        "status": "RELATED_GITHUB_SOURCE",
+        "repository": "szl-holdings/szl-energy-attest",
+        "revision": "14c1d8fdbb19dbd69f4dfc365d7f74d515bc4bdb",
+        "path": "szl_energy_attest"
+      },
+      "limitations": [
+        "The dedicated GitHub repository is archived; this artifact is retained for compatibility.",
+        "Energy is UNMEASURED when NVML is absent and no joule value may be inferred.",
+        "The policy gate is advisory unless the host enforces denial."
+      ]
+    },
+    {
+      "id": "SZLHOLDINGS/szl-blocked",
+      "slug": "szl-blocked",
+      "title": "Fail-closed governed call",
+      "summary": "Deny-by-default execution gate, hard security dominance, receipt chain, and Annex IV draft derivation.",
+      "revision": "a6642f7346be5839049eb9a5e29361da18a12562",
+      "packages": ["szl_blocked", "szl_euaiact"],
+      "dependencies": [],
+      "probe": {
+        "kind": "deny_default",
+        "package": "szl_blocked",
+        "required_result_type": "BlockedResult",
+        "required_callable_count": 0
+      },
+      "portfolio_status": "ACTIVE_EXPERIMENTAL",
+      "source_binding": {
+        "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+        "repository": null,
+        "revision": null,
+        "path": null
+      },
+      "limitations": [
+        "The Annex IV output is a draft skeleton and not legal advice.",
+        "The default-deny probe proves refusal behavior only, not policy completeness.",
+        "No independent policy audit is claimed."
+      ]
+    },
+    {
+      "id": "SZLHOLDINGS/szl-provctl",
+      "slug": "szl-provctl",
+      "title": "Provenance controller",
+      "summary": "in-toto Statement and SLSA provenance builders with DAG verification, tamper detection, and honest energy states.",
+      "revision": "81f787f24c7b0612aea8bb7b0374afcca3ab0250",
+      "packages": ["szl_provctl"],
+      "dependencies": [],
+      "optional_dependencies": ["pynvml"],
+      "probe": {
+        "kind": "selfcheck",
+        "package": "szl_provctl",
+        "call": "selfcheck",
+        "kwargs": {},
+        "required_truthy": ["ok", "checks.dag_tamper_detected", "checks.energy_cpu_unavailable_not_fabricated"]
+      },
+      "portfolio_status": "ACTIVE_EXPERIMENTAL",
+      "source_binding": {
+        "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+        "repository": null,
+        "revision": null,
+        "path": null
+      },
+      "limitations": [
+        "Locally valid statements are not equivalent to independent transparency-log inclusion.",
+        "No external verifier or key-distribution system is bundled.",
+        "Energy remains unavailable when no real meter is present."
+      ]
+    },
+    {
+      "id": "SZLHOLDINGS/szl-invariants",
+      "slug": "szl-invariants",
+      "title": "Executable receipt invariants",
+      "summary": "Eight falsifiable checks over receipt and ledger JSONL with explicit HOLDS, VIOLATED, and UNAVAILABLE states.",
+      "revision": "dd0e27ab9e26c2497bd44a025d6539aada83d58e",
+      "packages": ["szl_invariants"],
+      "dependencies": [],
+      "probe": {
+        "kind": "selfcheck",
+        "package": "szl_invariants",
+        "call": "selfcheck",
+        "kwargs": {},
+        "required_truthy": ["falsifiable_demonstrated"]
+      },
+      "portfolio_status": "ACTIVE_EXPERIMENTAL",
+      "source_binding": {
+        "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+        "repository": null,
+        "revision": null,
+        "path": null
+      },
+      "limitations": [
+        "Executable checks are not Lean proofs.",
+        "Ed25519 checks report UNAVAILABLE without a caller-supplied public key.",
+        "Only the registered invariants are evaluated."
+      ]
+    },
+    {
+      "id": "SZLHOLDINGS/szl-ouroboros",
+      "slug": "szl-ouroboros",
+      "title": "Bounded Ouroboros accounting",
+      "summary": "Bounded loop-tax accounting over recorded provider attempts with terminating, receipt-closed arithmetic.",
+      "revision": "756678f0bf096bde25054336c8e1ff78a9eb9172",
+      "packages": ["szl_ouroboros"],
+      "dependencies": [],
+      "probe": {
+        "kind": "selfcheck",
+        "package": "szl_ouroboros",
+        "call": "selfcheck",
+        "kwargs": {},
+        "required_truthy": ["arithmetic_ok", "withinBudget"]
+      },
+      "portfolio_status": "ACTIVE_EXPERIMENTAL",
+      "source_binding": {
+        "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+        "repository": null,
+        "revision": null,
+        "path": null
+      },
+      "limitations": [
+        "Self-check durations are deterministic fixtures, not performance measurements.",
+        "Serialization tax is a counterfactual quantity and not a claimed saving.",
+        "The kernel does not execute providers or network calls."
+      ]
+    },
+    {
+      "id": "SZLHOLDINGS/szl-formulas",
+      "slug": "szl-formulas",
+      "title": "Evidence-typed formula registry",
+      "summary": "Twenty-one canonical formula records, verbatim proof states, and a tamper-detecting governed-loop composer.",
+      "revision": "39a9fe6fd295f500f30ad7c6ff4cfdf559b48c4a",
+      "packages": ["szl_formulas"],
+      "dependencies": [],
+      "probe": {
+        "kind": "selfcheck",
+        "package": "szl_formulas",
+        "call": "selfcheck",
+        "kwargs": {},
+        "required_truthy": ["falsifiable_demonstrated", "locked_count_is_eight", "proof_status_covers_all"]
+      },
+      "portfolio_status": "ACTIVE_EXPERIMENTAL",
+      "source_binding": {
+        "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+        "repository": null,
+        "revision": null,
+        "path": null
+      },
+      "limitations": [
+        "The executable kernel contains 21 canonical formulas, not the wider research corpus.",
+        "Exactly eight records are locked-proven in this artifact.",
+        "Lambda uniqueness remains Conjecture 1 and is not promoted by composition."
+      ]
+    }
+  ]
+}

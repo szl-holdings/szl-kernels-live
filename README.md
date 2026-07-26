@@ -1,43 +1,126 @@
-# szl-kernels-live
+# SZL governed kernels
 
-**The governed-kernel suite hub.** One static page that links every live SZL kernel hologram —
-with each tile's **LIVE / ROADMAP status fetched from the Hugging Face Spaces API in _your_
-browser at page load**. A tile only shows **LIVE** when its Space runtime is actually `RUNNING`;
-otherwise it is honest **ROADMAP**. If the API can't be reached, the tile says **UNKNOWN** —
-never a fabricated green.
+[![kernel contracts](https://github.com/szl-holdings/szl-kernels-live/actions/workflows/kernel-contracts.yml/badge.svg)](https://github.com/szl-holdings/szl-kernels-live/actions/workflows/kernel-contracts.yml)
 
-- **Live Space:** https://huggingface.co/spaces/SZLHOLDINGS/szl-kernels-live
-- **Status:** ROADMAP → **LIVE** (hub live; member status is resolved live, never hardcoded).
+An inspectable release surface for the ten public
+[`SZLHOLDINGS` Hugging Face Kernels](https://huggingface.co/SZLHOLDINGS).
 
-## Members (status resolved live from HF)
+This repository does not call documentation a benchmark. It records:
 
-| Hologram | What it shows | Backing kernel |
-|---|---|---|
-| [szl-provctl-live](https://huggingface.co/spaces/SZLHOLDINGS/szl-provctl-live) | Provenance-DAG verify (in-toto v1 / SLSA v1), re-hashed in-browser | [szl-provctl](https://huggingface.co/SZLHOLDINGS/szl-provctl) |
-| [energy-attest-holo](https://huggingface.co/spaces/SZLHOLDINGS/energy-attest-holo) | Energy attestation — RED when meters are dead | [szl-kernels](https://huggingface.co/SZLHOLDINGS/szl-kernels) |
-| [governed-norm-holo](https://huggingface.co/spaces/SZLHOLDINGS/governed-norm-holo) | willay refusal classifiers, inspectable | [szl-governed-norm](https://huggingface.co/SZLHOLDINGS/szl-governed-norm) |
-| [lambda-gate-holo](https://huggingface.co/spaces/SZLHOLDINGS/lambda-gate-holo) | The Λ gate — Conjecture-1 explainer | [szl-lambda-gate](https://huggingface.co/SZLHOLDINGS/szl-lambda-gate) |
-| receipt-chain-live | a11oy receipt-lake chain, in-browser SHA3 verify | [szl-receipt](https://huggingface.co/SZLHOLDINGS/szl-receipt) |
-| szl-govsign-live | DSSE / in-toto signing, ECDSA P-256 in-browser | [szl-govsign](https://huggingface.co/SZLHOLDINGS/szl-govsign) |
-| szl-blocked-live | honest-BLOCKED as a first-class state | [szl-blocked](https://huggingface.co/SZLHOLDINGS/szl-blocked) |
+- the exact 40-character Hugging Face revision for every kernel;
+- every published `build/torch-cpu` file, Git object ID, size, and SHA-256;
+- the import package, dependencies, compatibility boundary, and probe;
+- an explicit source-binding status and retirement/replacement status;
+- limitations that remain visible next to the artifact;
+- a real CPU import/probe receipt covering all ten pinned revisions;
+- negative tests that reject mutable revisions, altered digests, and invented
+  driver support.
 
-## Honesty doctrine (binding)
+## Verified snapshot
 
-- **REPORTED** = status is the Hugging Face API's own answer, read client-side at page load —
-  never hardcoded, never faked. **LIVE** requires runtime `RUNNING`; anything else is **ROADMAP**;
-  an unreachable API is **UNKNOWN**.
-- **Λ = Conjecture 1** — advisory, never proven. Energy MEASURED-only. honest-BLOCKED surfaced.
-- **0 runtime CDN** — one vanilla-JS file.
+Recorded 2026-07-26:
 
-## Deploy
+| Evidence | Result | Meaning |
+|---|---:|---|
+| Public Kernel Hub inventory | 10/10 | All ten public artifacts were enumerated from the Hugging Face API. |
+| Exact live-head match | 10/10 | Each live head matched its reviewed 40-character pin at capture time. |
+| File-content integrity | 10/10 | Every `build/torch-cpu` file matched its checked SHA-256. |
+| Revision-pinned imports/probes | 10/10 | Every package imported and its declared functional probe passed on CPU. |
+| Hugging Face driver declarations | 0/10 | No CUDA/ROCm driver family is declared; none is inferred here. |
+| Exact public GitHub source binding | 0/10 | Three related source repositories are linked, but byte-equivalence is not claimed. |
 
-Hugging Face **static** Space — the root `index.html` is served as-is.
+The receipt is
+[`evidence/kernel-selfcheck-20260726.json`](evidence/kernel-selfcheck-20260726.json).
+It records Windows amd64, Python 3.11, CPU execution, and Torch 2.10 for the
+Torch-dependent packages. It is not a GPU, performance, security, or
+independent-audit receipt.
 
-## Estate
+## Portfolio shape
 
-Part of the SZL Holdings estate: [szl-kernels](https://huggingface.co/SZLHOLDINGS/szl-kernels) ·
-[a-11-oy.com](https://a-11-oy.com)
+- **Flagship experimental:** `szl-kernels`
+- **Active experimental:** `szl-govsign`, `szl-lambda-gate`, `szl-blocked`,
+  `szl-provctl`, `szl-invariants`, `szl-ouroboros`, `szl-formulas`
+- **Retained compatibility:** `szl-governed-norm`,
+  `governed-inference-meter`; the dedicated GitHub repositories are archived
+  and `szl-kernels` is the replacement direction
+
+These are Python governance kernels. They are not model weights, training
+artifacts, CUDA/Triton speed kernels, or evidence of autonomous decision
+authority.
+
+## Developer verification
+
+Offline contract and refusal checks:
+
+```bash
+python scripts/verify_kernel_registry.py
+python -m unittest discover -s tests -v
+```
+
+Live head, file-set, and SHA-256 verification:
+
+```bash
+python scripts/verify_kernel_registry.py --live
+```
+
+Real revision-pinned imports and declared probes:
+
+```bash
+python scripts/verify_kernel_registry.py \
+  --live \
+  --run-imports \
+  --receipt evidence/kernel-selfcheck-20260726.json
+```
+
+Torch is required for `szl-kernels`, `szl-lambda-gate`, and
+`szl-governed-norm`; `cryptography` is required for `szl-govsign`.
+`pynvml` is optional. Without a real NVML meter, energy remains
+`UNMEASURED`.
+
+The snapshot generator never advances a revision automatically:
+
+```bash
+python scripts/snapshot_kernel_contracts.py
+```
+
+An update requires a human-reviewed change to
+[`registry/kernel-pins.json`](registry/kernel-pins.json), regeneration, live
+verification, and review of the resulting file-digest diff.
+
+## Loading contract
+
+Hugging Face Kernels execute repository code, so use both a full revision and
+the explicit trust flag:
+
+```python
+from kernels import get_kernel
+
+kernel = get_kernel(
+    "SZLHOLDINGS/szl-kernels",
+    revision="06cc46f9733a844ee1c4cab558b06b3bd2d377ea",
+    trust_remote_code=True,
+)
+result = kernel.selfcheck()
+assert result["ok"] is True
+```
+
+Do not replace the revision with `main` in production or demonstrations.
+
+## Boundaries
+
+- Lambda uniqueness remains **Conjecture 1 (open)**. The gate is advisory.
+- Functional self-checks are not independent security or correctness audits.
+- No CUDA, ROCm, throughput, latency, numerical-stability, or energy benchmark
+  is claimed by this snapshot.
+- `szl-blocked` proves its default-deny path without executing the protected
+  callable; it does not prove policy completeness.
+- Source links marked `RELATED_GITHUB_SOURCE` are related source, not a
+  byte-for-byte provenance claim.
+- The seven `HF_REVISION_PINNED_GITHUB_SOURCE_OPEN` entries remain release
+  work: their immutable Hugging Face source is inspectable, but no exact public
+  GitHub source binding was found.
 
 ## License
 
-Apache-2.0.
+Apache-2.0 for this registry, verifier, tests, and site. Each kernel retains the
+license published with its own artifact.

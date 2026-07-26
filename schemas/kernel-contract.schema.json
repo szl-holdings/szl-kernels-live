@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://szl-holdings.github.io/szl-kernels-live/schemas/kernel-contract.schema.json",
+  "title": "SZL governed kernel contract",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "revision",
+    "artifact",
+    "runtime",
+    "probe",
+    "source_binding",
+    "limitations",
+    "deprecation"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "id": {"type": "string", "pattern": "^SZLHOLDINGS/[A-Za-z0-9._-]+$"},
+    "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "artifact": {
+      "type": "object",
+      "required": ["repo_type", "build", "files", "tree_digest_sha256"],
+      "properties": {
+        "repo_type": {"const": "kernel"},
+        "build": {"const": "torch-cpu"},
+        "files": {"type": "array", "minItems": 2},
+        "tree_digest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["classification", "packages", "measured_compatibility", "hf_declared_driver_families"]
+    },
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "deprecation": {
+      "type": "object",
+      "required": ["status", "replacement"],
+      "properties": {
+        "status": {
+          "enum": ["FLAGSHIP_EXPERIMENTAL", "ACTIVE_EXPERIMENTAL", "RETAINED_COMPATIBILITY"]
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

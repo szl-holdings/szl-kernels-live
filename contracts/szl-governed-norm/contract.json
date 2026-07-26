@@ -1,0 +1,109 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/szl-governed-norm",
+  "title": "Governed normalization",
+  "summary": "RMSNorm, LayerNorm, fused add plus RMSNorm, optional governance axes, and hash-chained receipts.",
+  "revision": "52ebdccd8d181e2b367387353ad87484e2d9d8b3",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-governed-norm/tree/52ebdccd8d181e2b367387353ad87484e2d9d8b3/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 194,
+        "git_oid": "d6074f7215bb88428ddfcb87774a6be83b7eb3e9",
+        "sha256": "9a55164bc86c2efb0b7935a9f77983249865cd1281557eef3299710eeb8ace83"
+      },
+      {
+        "path": "build/torch-cpu/szl_governed_norm/__init__.py",
+        "size": 10561,
+        "git_oid": "1b552f2b530394515f18c9fe52777432228c588b",
+        "sha256": "5e172a3eaa855c2a786e5739e50b7737e3c1c34b8669f5d1a803f32640c76f7c"
+      },
+      {
+        "path": "build/torch-cpu/szl_governed_norm/_norm.py",
+        "size": 10505,
+        "git_oid": "362b4a49f14d32549b3a21de7d52bc36f38e7286",
+        "sha256": "c3ea50bccb14636cca2a55a3c4131a85e4eeebd93c443aee829c3b7d615e1f54"
+      },
+      {
+        "path": "build/torch-cpu/szl_governed_norm/_ops.py",
+        "size": 371,
+        "git_oid": "b9ce34a832aadb941c201893ee69b7990138a28c",
+        "sha256": "50d1ee859d11b83605d6e9970e8a17e706db23c61b9c5438cecfdbd45340a9ea"
+      },
+      {
+        "path": "build/torch-cpu/szl_governed_norm/_receipt.py",
+        "size": 4738,
+        "git_oid": "20024b577e7a887296573896ba324f64c59d1219",
+        "sha256": "74363b5cd0afb1e8e8c5e22aeee985410bc72a34e441155569d909d60c62e28d"
+      },
+      {
+        "path": "build/torch-cpu/szl_governed_norm/layers.py",
+        "size": 2464,
+        "git_oid": "5948cbcc3f52defc2ff9d466926417847e8a8b75",
+        "sha256": "084486043497555520533db63b2c2259a23bba40731ff765d2d659ae80fa7296"
+      }
+    ],
+    "tree_digest_sha256": "5acdb7ee4de22ba59c5230a621174af0bf427ebafa0a531e4278f2639f54ee1a"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-governed-norm\", revision=\"52ebdccd8d181e2b367387353ad87484e2d9d8b3\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "szl_governed_norm"
+    ],
+    "dependencies": [
+      "torch"
+    ],
+    "optional_dependencies": [],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "selfcheck",
+    "package": "szl_governed_norm",
+    "call": "selfcheck",
+    "kwargs": {},
+    "required_truthy": [
+      "ok",
+      "receipt_ok",
+      "checks.rms_norm",
+      "checks.layer_norm"
+    ]
+  },
+  "source_binding": {
+    "status": "RELATED_GITHUB_SOURCE",
+    "repository": "szl-holdings/szl-lambda-gate",
+    "revision": "8b95ca47571fda65a52b0b6189677ec089a6e503",
+    "path": "torch-ext/szl_lambda_gate/governed_norm"
+  },
+  "limitations": [
+    "The dedicated GitHub repository is archived; this artifact is retained for compatibility.",
+    "Only CPU import and functional self-check evidence is recorded here.",
+    "No CUDA, ROCm, latency, or numerical-stability benchmark is claimed."
+  ],
+  "deprecation": {
+    "status": "RETAINED_COMPATIBILITY",
+    "replacement": "SZLHOLDINGS/szl-kernels"
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "szl_governed_norm"
+  }
+}

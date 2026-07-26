@@ -1,0 +1,94 @@
+{
+  "$schema": "../../schemas/kernel-contract.schema.json",
+  "schema_version": "1.0.0",
+  "id": "SZLHOLDINGS/szl-formulas",
+  "title": "Evidence-typed formula registry",
+  "summary": "Twenty-one canonical formula records, verbatim proof states, and a tamper-detecting governed-loop composer.",
+  "revision": "39a9fe6fd295f500f30ad7c6ff4cfdf559b48c4a",
+  "recorded_at": "2026-07-26T03:00:00Z",
+  "artifact": {
+    "repo_type": "kernel",
+    "build": "torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-formulas/tree/39a9fe6fd295f500f30ad7c6ff4cfdf559b48c4a/build/torch-cpu",
+    "files": [
+      {
+        "path": "build/torch-cpu/metadata.json",
+        "size": 184,
+        "git_oid": "fcfb47fbe3ca6dbb2c75f21f2d736449e391b9d7",
+        "sha256": "7e371b606201b0927a86f7b9981b024ea60bfb21e3757c51164109eef2b147a5"
+      },
+      {
+        "path": "build/torch-cpu/szl_formulas/__init__.py",
+        "size": 9560,
+        "git_oid": "bb38f5d4f940d55f84874cdf12fb071a649ed64e",
+        "sha256": "1ca761f2b9916ca1dc068d44e31c250bc4bd8478c358cee42ec6ddcd97f179a5"
+      },
+      {
+        "path": "build/torch-cpu/szl_formulas/_composer.py",
+        "size": 6805,
+        "git_oid": "7b1dc0e070731f6d200e1ad6d264502f77a9bb6c",
+        "sha256": "e588783ee1909062e8328e987feb88a4b20860d0c984a30186570e99fb79820f"
+      },
+      {
+        "path": "build/torch-cpu/szl_formulas/_formulas.py",
+        "size": 14747,
+        "git_oid": "d02995a11a0ea57ed67dceccc54aad357b5cef78",
+        "sha256": "58d6abad8e68e42880f9f1a9ecd47f1e292e8ac6a5927b1066d01df05baf45af"
+      }
+    ],
+    "tree_digest_sha256": "0fe7c1140a1d4a7a93673746497d9770a7c453a2ca17896d66b0115d9dfca08a"
+  },
+  "loading": {
+    "method": "kernels.get_kernel",
+    "trust_remote_code": true,
+    "revision_required": true,
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-formulas\", revision=\"39a9fe6fd295f500f30ad7c6ff4cfdf559b48c4a\", trust_remote_code=True)"
+  },
+  "runtime": {
+    "classification": "PYTHON_GOVERNANCE_KERNEL",
+    "packages": [
+      "szl_formulas"
+    ],
+    "dependencies": [],
+    "optional_dependencies": [],
+    "python": ">=3.9",
+    "artifact_build": "torch-cpu",
+    "hf_declared_driver_families": [],
+    "measured_compatibility": {
+      "status": "MEASURED",
+      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
+      "environment": "Windows amd64, Python 3.11, CPU execution"
+    }
+  },
+  "probe": {
+    "kind": "selfcheck",
+    "package": "szl_formulas",
+    "call": "selfcheck",
+    "kwargs": {},
+    "required_truthy": [
+      "falsifiable_demonstrated",
+      "locked_count_is_eight",
+      "proof_status_covers_all"
+    ]
+  },
+  "source_binding": {
+    "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+    "repository": null,
+    "revision": null,
+    "path": null
+  },
+  "limitations": [
+    "The executable kernel contains 21 canonical formulas, not the wider research corpus.",
+    "Exactly eight records are locked-proven in this artifact.",
+    "Lambda uniqueness remains Conjecture 1 and is not promoted by composition."
+  ],
+  "deprecation": {
+    "status": "ACTIVE_EXPERIMENTAL",
+    "replacement": null
+  },
+  "generation": {
+    "tool": "scripts/snapshot_kernel_contracts.py",
+    "mode": "reviewed immutable pin; no automatic revision advancement",
+    "primary_package": "szl_formulas"
+  }
+}
