@@ -23,6 +23,11 @@ jobs:
         run: python scripts/verify_kernel_registry.py
       - name: Run fail-closed tests
         run: python -m unittest discover -s tests -v
+      - name: Build source-bound Hugging Face bundle
+        run: |
+          python scripts/build_hf_space_bundle.py \
+            --output "$RUNNER_TEMP/hf-bundle" \
+            --source-sha "$GITHUB_SHA"
 
   live-integrity:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

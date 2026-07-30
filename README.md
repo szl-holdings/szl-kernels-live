@@ -87,6 +87,19 @@ An update requires a human-reviewed change to
 [`registry/kernel-pins.json`](registry/kernel-pins.json), regeneration, live
 verification, and review of the resulting file-digest diff.
 
+## GitHub to Hugging Face release
+
+The public Space is built from this repository by
+[`scripts/build_hf_space_bundle.py`](scripts/build_hf_space_bundle.py). The
+bundle records the exact 40-character GitHub revision, every deployed file
+digest, and a deterministic bundle digest. The deployer uses the observed Hub
+head as an optimistic lock, replaces the Space tree atomically, and refuses a
+mutable or mismatched source revision.
+
+Every `main` deployment also attests `hf-deploy-manifest.json` through GitHub
+OIDC. That attestation binds the manifest to the GitHub workflow; it does not
+turn functional self-checks into a security, GPU, or performance benchmark.
+
 ## Loading contract
 
 Hugging Face Kernels execute repository code, so use both a full revision and
