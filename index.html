@@ -219,13 +219,13 @@
       border: 0;
     }
     @media (max-width: 820px) {
-      header { padding-top: 42px; }
+      header { padding-top: max(42px, env(safe-area-inset-top)); }
       .metric-grid, .grid, .truth, .provenance { grid-template-columns: 1fr 1fr; }
       .section-head { display: block; }
       .section-head p { margin-top: 8px; }
     }
     @media (max-width: 560px) {
-      .shell { width: min(calc(100% - 22px), var(--max)); }
+      .shell { width: min(calc(100% - max(22px, env(safe-area-inset-left) + env(safe-area-inset-right))), var(--max)); }
       .metric-grid, .grid, .truth, .provenance { grid-template-columns: 1fr; }
       .metric { min-height: auto; }
       .card-top { display: block; }
@@ -261,7 +261,7 @@
       <div class="metric"><strong id="kernel-count">—</strong><span>recorded immutable kernel contracts</span></div>
       <div class="metric"><strong id="pass-count">—</strong><span>2026-07-26 revision-pinned CPU imports and probes</span></div>
       <div class="metric"><strong>0</strong><span>driver families inferred</span></div>
-      <div class="metric"><strong id="head-count">checking</strong><span>live heads matching reviewed pins</span></div>
+      <div class="metric"><strong id="head-count">—</strong><span id="head-detail">live-head checks pending</span></div>
     </div>
     <div class="truth" id="evaluator">
       <div>
@@ -355,6 +355,8 @@
       const status = document.querySelector("#load-status");
       const template = document.querySelector("#kernel-card");
       let matches = 0;
+      let drifts = 0;
+      let unavailable = 0;
       let settled = 0;
 
       function setText(root, selector, value) {
@@ -362,8 +364,16 @@
       }
 
       function updateHeadCount(total) {
-        document.querySelector("#head-count").textContent =
-          settled === total ? `${matches}/${total}` : `${matches}/${settled}`;
+        const count = document.querySelector("#head-count");
+        const detail = document.querySelector("#head-detail");
+        if (settled !== total) {
+          count.textContent = "—";
+          detail.textContent = `live-head checks pending (${settled}/${total} settled)`;
+          return;
+        }
+        count.textContent = unavailable === 0 ? `${matches}/${total}` : "INCOMPLETE";
+        detail.textContent =
+          `${matches} match · ${drifts} drift · ${unavailable} unavailable`;
       }
 
       function liveStatus(card, row, total) {
@@ -380,12 +390,14 @@
               badge.className = "badge match";
               badge.textContent = "LIVE HEAD MATCH";
             } else {
+              drifts += 1;
               badge.className = "badge drift";
               badge.textContent = "HEAD DRIFT";
               badge.title = `Live head: ${data.sha || "missing"}`;
             }
           })
           .catch((error) => {
+            unavailable += 1;
             badge.className = "badge unknown";
             badge.textContent = "HEAD UNAVAILABLE";
             badge.title = error.message;
@@ -460,6 +472,9 @@
         })
         .catch((error) => {
           grid.setAttribute("aria-busy", "false");
+          document.querySelector("#head-count").textContent = "—";
+          document.querySelector("#head-detail").textContent =
+            "live-head checks unavailable";
           status.textContent = `Contracts unavailable: ${error.message}`;
           status.style.color = "var(--red)";
         });
