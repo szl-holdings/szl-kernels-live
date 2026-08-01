@@ -98,6 +98,10 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
+            'content="width=device-width, initial-scale=1, viewport-fit=cover"',
+            html,
+        )
+        self.assertIn(
             "header { padding-top: max(42px, env(safe-area-inset-top)); }", html
         )
         self.assertIn(
