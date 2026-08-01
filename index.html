@@ -49,7 +49,12 @@
       padding: .75rem 1rem;
     }
     .skip:focus { top: 1rem; }
-    .shell { width: min(calc(100% - max(32px, env(safe-area-inset-left) + env(safe-area-inset-right))), var(--max)); margin: 0 auto; }
+    .shell {
+      width: min(100%, calc(var(--max) + 32px));
+      margin: 0 auto;
+      padding-left: max(16px, env(safe-area-inset-left));
+      padding-right: max(16px, env(safe-area-inset-right));
+    }
     header { padding: max(64px, env(safe-area-inset-top)) 0 30px; }
     .eyebrow {
       color: var(--green);
@@ -225,7 +230,11 @@
       .section-head p { margin-top: 8px; }
     }
     @media (max-width: 560px) {
-      .shell { width: min(calc(100% - max(22px, env(safe-area-inset-left) + env(safe-area-inset-right))), var(--max)); }
+      .shell {
+        width: min(100%, calc(var(--max) + 22px));
+        padding-left: max(11px, env(safe-area-inset-left));
+        padding-right: max(11px, env(safe-area-inset-right));
+      }
       .metric-grid, .grid, .truth, .provenance { grid-template-columns: 1fr; }
       .metric { min-height: auto; }
       .card-top { display: block; }
@@ -348,7 +357,12 @@
     </article>
   </template>
 
-  <script>
+  <script type="module">
+    import {
+      fetchLiveHead,
+      validateSnapshot,
+    } from "./scripts/kernel_portfolio_truth.mjs";
+
     (() => {
       "use strict";
       const grid = document.querySelector("#kernel-grid");
@@ -379,21 +393,22 @@
       function liveStatus(card, row, total) {
         const badge = card.querySelector("[data-live]");
         const url = `https://huggingface.co/api/kernels/${row.id}`;
-        fetch(url, { headers: { Accept: "application/json" } })
-          .then((response) => {
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return response.json();
-          })
-          .then((data) => {
-            if (data.sha === row.revision) {
+        fetchLiveHead(url, row.revision)
+          .then((result) => {
+            if (result.state === "MATCH") {
               matches += 1;
               badge.className = "badge match";
               badge.textContent = "LIVE HEAD MATCH";
-            } else {
+            } else if (result.state === "DRIFT") {
               drifts += 1;
               badge.className = "badge drift";
               badge.textContent = "HEAD DRIFT";
-              badge.title = `Live head: ${data.sha || "missing"}`;
+              badge.title = `Live head: ${result.sha}`;
+            } else {
+              unavailable += 1;
+              badge.className = "badge unknown";
+              badge.textContent = "HEAD UNAVAILABLE";
+              badge.title = result.reason;
             }
           })
           .catch((error) => {
@@ -420,9 +435,7 @@
       ])
         .then(([index, receipt]) => {
           const rows = index.kernels;
-          const passed = new Map(
-            receipt.results.map((result) => [result.id, result.status])
-          );
+          const passed = validateSnapshot(index, receipt);
           document.querySelector("#kernel-count").textContent = String(rows.length);
           document.querySelector("#pass-count").textContent =
             `${receipt.summary.passed}/${receipt.summary.kernels}`;
