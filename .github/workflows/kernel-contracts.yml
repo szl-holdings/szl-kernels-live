@@ -22,7 +22,9 @@ jobs:
       - name: Verify checked contracts
         run: python scripts/verify_kernel_registry.py
       - name: Run fail-closed tests
-        run: python -m unittest discover -s tests -v
+        run: |
+          python -m unittest discover -s tests -v
+          node --test tests/test_kernel_portfolio_truth.mjs
       - name: Build source-bound Hugging Face bundle
         run: |
           python scripts/build_hf_space_bundle.py \

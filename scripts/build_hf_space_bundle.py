@@ -121,12 +121,17 @@ def build_bundle(output: Path, source_sha: str) -> dict[str, object]:
             }
         )
     manifest_core = {
-        "schema": "szl.hf-deploy-manifest/v1",
+        "schema": "szl.hf-deploy-manifest/v2",
         "source_repository": SOURCE_REPO,
         "source_revision": source_sha,
         "target": HF_REPO,
         "file_count": len(files),
         "files": files,
+        "self_manifest": {
+            "path": "hf-deploy-manifest.json",
+            "included_in_files": False,
+            "reason": "self-digest would be recursive; exact bytes are bound by GitHub OIDC attestation",
+        },
     }
     manifest = {
         **manifest_core,
