@@ -6,9 +6,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+import urllib.parse
 
 from scripts.build_hf_space_bundle import build_bundle
-from scripts.deploy_hf_space import validate_bundle
+from scripts.deploy_hf_space import (
+    HF_REPO,
+    attest_publication,
+    require_governed_main,
+    validate_bundle,
+)
 
 
 SOURCE_SHA = "a" * 40
@@ -169,6 +176,118 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertIn("branches/main", workflow)
         self.assertIn('data.get("protected") is True or sys.exit', workflow)
         self.assertIn('test "$live_sha" = "$GITHUB_SHA"', workflow)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", workflow)
+        self.assertIn('--result "$RUNNER_TEMP/hf-deploy-result.json"', workflow)
+        self.assertIn(
+            '--attestation "$RUNNER_TEMP/hf-live-attestation.json"', workflow
+        )
+        self.assertIn("if: always()", workflow)
+        self.assertIn("hf-space-deployment-evidence", workflow)
+
+    def test_in_process_guard_requires_exact_no_bypass_main(self) -> None:
+        def response(url: str, _token: str = "") -> object:
+            if url.endswith("/repos/szl-holdings/szl-kernels-live"):
+                return {"default_branch": "main"}
+            if url.endswith("/branches/main"):
+                return {"commit": {"sha": SOURCE_SHA}}
+            if url.endswith("/rulesets?includes_parents=true"):
+                return [{"id": 7, "enforcement": "active"}]
+            if url.endswith("/rulesets/7"):
+                return {
+                    "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+                    "rules": [
+                        {"type": "pull_request"},
+                        {"type": "non_fast_forward"},
+                        {"type": "required_linear_history"},
+                    ],
+                    "bypass_actors": [],
+                }
+            raise AssertionError(url)
+
+        environment = {
+            "GITHUB_REPOSITORY": "szl-holdings/szl-kernels-live",
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_TOKEN": "test-token",
+            "GITHUB_API_URL": "https://api.github.test",
+        }
+        with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
+            "scripts.deploy_hf_space._request_json", side_effect=response
+        ):
+            authorization = require_governed_main(SOURCE_SHA)
+            self.assertEqual(authorization["ruleset_ids"], [7])
+
+        def bypassed(url: str, token: str = "") -> object:
+            value = response(url, token)
+            if url.endswith("/rulesets/7"):
+                value["bypass_actors"] = [{"actor_type": "OrganizationAdmin"}]
+            return value
+
+        with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
+            "scripts.deploy_hf_space._request_json", side_effect=bypassed
+        ), self.assertRaisesRegex(RuntimeError, "no-bypass"):
+            require_governed_main(SOURCE_SHA)
+
+    def test_public_attestation_binds_exact_revision_bytes_and_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "bundle"
+            build_bundle(bundle, SOURCE_SHA)
+            target_sha = "b" * 40
+            result = Path(temporary) / "result.json"
+            result.write_text(
+                json.dumps(
+                    {
+                        "source_revision": SOURCE_SHA,
+                        "target": HF_REPO,
+                        "hf_revision": target_sha,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            attestation = Path(temporary) / "attestation.json"
+            expected_paths = {
+                path.relative_to(bundle).as_posix()
+                for path in bundle.rglob("*")
+                if path.is_file()
+            }
+
+            def hf_json(url: str, _token: str = "") -> object:
+                if "/tree/" in url:
+                    return [
+                        {"type": "file", "path": path}
+                        for path in sorted(expected_paths | {".gitattributes"})
+                    ]
+                return {"sha": target_sha, "runtime": {"stage": "RUNNING"}}
+
+            def public_bytes(url: str) -> tuple[int, bytes]:
+                if "/resolve/" in url:
+                    marker = f"/resolve/{target_sha}/"
+                    relative = urllib.parse.unquote(url.split(marker, 1)[1])
+                    return 200, (bundle / relative).read_bytes()
+                if "SPACE_PROVENANCE.json" in url:
+                    return 200, (bundle / "SPACE_PROVENANCE.json").read_bytes()
+                return 200, b"\u003chtml>operational</html>"
+
+            with mock.patch(
+                "scripts.deploy_hf_space._request_json", side_effect=hf_json
+            ), mock.patch(
+                "scripts.deploy_hf_space._public_bytes", side_effect=public_bytes
+            ):
+                evidence = attest_publication(
+                    bundle,
+                    SOURCE_SHA,
+                    result,
+                    attestation,
+                    timeout=1,
+                )
+            self.assertEqual(evidence["status"], "MEASURED")
+            self.assertEqual(evidence["hf_revision"], target_sha)
+            self.assertEqual(evidence["files_verified"], len(expected_paths))
+            self.assertTrue(evidence["public_source_identity"])
+            self.assertEqual(
+                json.loads(attestation.read_text(encoding="utf-8")), evidence
+            )
 
 
 if __name__ == "__main__":
