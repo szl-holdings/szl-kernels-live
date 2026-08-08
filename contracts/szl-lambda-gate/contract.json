@@ -5,7 +5,7 @@
   "title": "Advisory Lambda gate",
   "summary": "Differentiable weighted geometric aggregation with empirical A1-A4 checks and a non-compensatory advisory gate.",
   "revision": "47c7eb2db8859507d4115adbbff20c65de66dbb5",
-  "recorded_at": "2026-07-26T03:00:00Z",
+  "recorded_at": "2026-08-08T21:02:39Z",
   "artifact": {
     "repo_type": "kernel",
     "build": "torch-cpu",
@@ -64,8 +64,8 @@
     "hf_declared_driver_families": [],
     "measured_compatibility": {
       "status": "MEASURED",
-      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
-      "environment": "Windows amd64, Python 3.11, CPU execution"
+      "receipt": "../../evidence/kernel-selfcheck-20260808.json",
+      "environment": "See the bound receipt for the measured CPU environment"
     }
   },
   "probe": {

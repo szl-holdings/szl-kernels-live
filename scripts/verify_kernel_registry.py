@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import importlib
 import json
@@ -21,6 +22,16 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS_DIR = ROOT / "contracts"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def receipt_recorded_at(value: str | None) -> str:
+    if value is None:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        recorded = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError) as error:
+        raise ValueError("recorded_at must be an exact UTC timestamp ending in Z") from error
+    return recorded.replace(tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def canonical_json(value: object) -> bytes:
@@ -236,7 +247,13 @@ def run_probe(contract: dict) -> dict:
                     del sys.modules[name]
 
 
-def write_receipt(path: Path, contracts: list[dict], results: list[dict]) -> None:
+def write_receipt(
+    path: Path,
+    contracts: list[dict],
+    results: list[dict],
+    *,
+    recorded_at: str | None = None,
+) -> None:
     torch_version = None
     try:
         import torch
@@ -248,7 +265,7 @@ def write_receipt(path: Path, contracts: list[dict], results: list[dict]) -> Non
         "schema_version": "1.0.0",
         "claim_class": "MEASURED",
         "scope": "revision-pinned CPU imports and declared probes",
-        "recorded_at": "2026-07-26T03:00:00Z",
+        "recorded_at": receipt_recorded_at(recorded_at),
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -295,6 +312,10 @@ def main() -> int:
         help="download exact builds, import packages, and run declared probes",
     )
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument(
+        "--recorded-at",
+        help="exact UTC receipt timestamp; defaults to the current UTC second",
+    )
     args = parser.parse_args()
 
     contracts = load_contracts(args.contracts.resolve())
@@ -306,9 +327,16 @@ def main() -> int:
         for contract in contracts:
             results.append(run_probe(contract))
         if args.receipt:
-            write_receipt(args.receipt.resolve(), contracts, results)
+            write_receipt(
+                args.receipt.resolve(),
+                contracts,
+                results,
+                recorded_at=args.recorded_at,
+            )
     elif args.receipt:
         raise ValueError("--receipt requires --run-imports")
+    elif args.recorded_at:
+        raise ValueError("--recorded-at requires --receipt")
     print(
         f"PASS: {len(contracts)} offline contracts"
         + ("; live heads and contents match" if args.live else "")

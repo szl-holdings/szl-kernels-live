@@ -37,8 +37,10 @@ function fixture() {
 
 test("checked-in snapshot is an exact ten-kernel PASS vector", () => {
   const index = JSON.parse(fs.readFileSync("contracts/index.json", "utf8"));
+  const receiptDate = index.recorded_at.slice(0, 10).replaceAll("-", "");
+  assert.match(receiptDate, /^\d{8}$/);
   const receipt = JSON.parse(
-    fs.readFileSync("evidence/kernel-selfcheck-20260726.json", "utf8"),
+    fs.readFileSync(`evidence/kernel-selfcheck-${receiptDate}.json`, "utf8"),
   );
   const statuses = validateSnapshot(index, receipt);
   assert.equal(statuses.size, 10);

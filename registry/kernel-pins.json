@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "portfolio": "SZLHOLDINGS governed kernels",
-  "recorded_at": "2026-07-26T03:00:00Z",
+  "recorded_at": "2026-08-08T21:02:39Z",
   "doctrine": {
     "runtime_claim": "CPU import/self-check evidence only unless a contract states otherwise",
     "lambda_status": "Conjecture 1 (open); advisory only",
@@ -42,7 +42,7 @@
       "slug": "szl-kernels",
       "title": "Unified governed-kernel suite",
       "summary": "Cross-kernel CPU suite for normalization, advisory Lambda gating, energy honesty, and receipt chaining.",
-      "revision": "06cc46f9733a844ee1c4cab558b06b3bd2d377ea",
+      "revision": "95f74bc6720cf95953b15cc6a454ee4d21dcf107",
       "packages": ["szl_kernels"],
       "dependencies": ["torch"],
       "probe": {
@@ -54,10 +54,22 @@
       },
       "portfolio_status": "FLAGSHIP_EXPERIMENTAL",
       "source_binding": {
-        "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
-        "repository": null,
-        "revision": null,
-        "path": null
+        "status": "SOURCE_BOUND_AUTHORIZED_RELEASE",
+        "repository": "szl-holdings/szl-kernels",
+        "revision": "8fa0e9fe0e45a79276a31ed0813b1eeef69a96b1",
+        "path": "build/torch-universal/szl_kernels",
+        "hf_revision": "95f74bc6720cf95953b15cc6a454ee4d21dcf107",
+        "artifact_tree_sha256": "05e152e76cd3e481cdb53835e4805a58796e4418dc8ff62fb6bb723aed153e00",
+        "binding_sha256": "ad24c91123cde50acc6192daf23a3d7832fbc3ca38f1e96196865ba8a3ea4add",
+        "readback": "EXACT_BYTES_VERIFIED",
+        "release_authorization": {
+          "status": "AUTHORIZED_PROTECTED_MAIN",
+          "publisher_repository": "szl-holdings/szl-forge",
+          "publisher_revision": "99800a1a4d2cb7d87a1d8d6f13e13537297a430d",
+          "publisher_run": "https://github.com/szl-holdings/szl-forge/actions/runs/30721609223",
+          "publication_contract": "https://huggingface.co/SZLHOLDINGS/szl-kernels/blob/6b83d1bf378db24cd8a5a7dd815d28f7a6404cd8/publication.json",
+          "source_checks_run": "https://github.com/szl-holdings/szl-kernels/actions/runs/30718336607"
+        }
       },
       "limitations": [
         "The bundled self-check is a functional check, not a throughput or accuracy benchmark.",

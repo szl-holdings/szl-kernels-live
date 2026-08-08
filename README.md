@@ -27,10 +27,10 @@ Recorded 2026-07-26:
 | File-content integrity | 10/10 | Every `build/torch-cpu` file matched its checked SHA-256. |
 | Revision-pinned imports/probes | 10/10 | Every package imported and its declared functional probe passed on CPU. |
 | Hugging Face driver declarations | 0/10 | No CUDA/ROCm driver family is declared; none is inferred here. |
-| Exact public GitHub source binding | 0/10 | Three related source repositories are linked, but byte-equivalence is not claimed. |
+| Exact public GitHub source binding | 1/10 | `szl-kernels` is authorized from protected source and exact-byte read back; three other entries remain related-source only. |
 
 The receipt is
-[`evidence/kernel-selfcheck-20260726.json`](evidence/kernel-selfcheck-20260726.json).
+[`evidence/kernel-selfcheck-20260808.json`](evidence/kernel-selfcheck-20260808.json).
 It records Windows amd64, Python 3.11, CPU execution, and Torch 2.10 for the
 Torch-dependent packages. It is not a GPU, performance, security, or
 independent-audit receipt.
@@ -69,7 +69,7 @@ Real revision-pinned imports and declared probes:
 python scripts/verify_kernel_registry.py \
   --live \
   --run-imports \
-  --receipt evidence/kernel-selfcheck-20260726.json
+  --receipt evidence/kernel-selfcheck-20260808.json
 ```
 
 Torch is required for `szl-kernels`, `szl-lambda-gate`, and
@@ -112,7 +112,7 @@ from kernels import get_kernel
 
 kernel = get_kernel(
     "SZLHOLDINGS/szl-kernels",
-    revision="06cc46f9733a844ee1c4cab558b06b3bd2d377ea",
+    revision="95f74bc6720cf95953b15cc6a454ee4d21dcf107",
     trust_remote_code=True,
 )
 result = kernel.selfcheck()
@@ -131,7 +131,7 @@ Do not replace the revision with `main` in production or demonstrations.
   callable; it does not prove policy completeness.
 - Source links marked `RELATED_GITHUB_SOURCE` are related source, not a
   byte-for-byte provenance claim.
-- The seven `HF_REVISION_PINNED_GITHUB_SOURCE_OPEN` entries remain release
+- The six `HF_REVISION_PINNED_GITHUB_SOURCE_OPEN` entries remain release
   work: their immutable Hugging Face source is inspectable, but no exact public
   GitHub source binding was found.
 
