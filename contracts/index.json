@@ -32,7 +32,7 @@
       "revision": "95f74bc6720cf95953b15cc6a454ee4d21dcf107",
       "tree_digest_sha256": "3aedfbe0f103c4ee37326a5d8c19f663a0bf68871816c0b54ea5686965575af5",
       "portfolio_status": "FLAGSHIP_EXPERIMENTAL",
-      "source_status": "SOURCE_BOUND_AUTHORIZED_RELEASE",
+      "source_status": "SOURCE_BINDING_UNVERIFIED_CONTRADICTED",
       "contract": "szl-kernels/contract.json",
       "limitations": [
         "The bundled self-check is a functional check, not a throughput or accuracy benchmark.",

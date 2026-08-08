@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 
@@ -84,17 +85,20 @@ class KernelRegistryContractTests(unittest.TestCase):
                 f"../../evidence/{receipt_path.name}",
             )
 
-    def test_receipt_timestamp_is_injected_or_current_utc(self) -> None:
-        explicit = "2030-01-02T03:04:05Z"
-        self.assertEqual(verifier.receipt_recorded_at(explicit), explicit)
-        self.assertRegex(
-            verifier.receipt_recorded_at(None),
-            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+    def test_receipt_timestamp_is_bound_to_contract_index(self) -> None:
+        expected = self.index["recorded_at"]
+        self.assertEqual(
+            verifier.receipt_recorded_at(None, self.contracts), expected
         )
+        self.assertEqual(
+            verifier.receipt_recorded_at(expected, self.contracts), expected
+        )
+        with self.assertRaisesRegex(ValueError, "does not match contract index"):
+            verifier.receipt_recorded_at("2030-01-02T03:04:05Z", self.contracts)
         with self.assertRaisesRegex(ValueError, "exact UTC timestamp"):
-            verifier.receipt_recorded_at("2030-01-02")
+            verifier.receipt_recorded_at("2030-01-02", self.contracts)
 
-    def test_szl_kernels_release_is_source_bound_and_authorized(self) -> None:
+    def test_szl_kernels_source_binding_is_behaviorally_contradicted(self) -> None:
         contract = next(
             row for row in self.contracts if row["id"] == "SZLHOLDINGS/szl-kernels"
         )
@@ -103,16 +107,65 @@ class KernelRegistryContractTests(unittest.TestCase):
             contract["revision"],
             "95f74bc6720cf95953b15cc6a454ee4d21dcf107",
         )
-        self.assertEqual(binding["status"], "SOURCE_BOUND_AUTHORIZED_RELEASE")
         self.assertEqual(
             binding["revision"],
             "8fa0e9fe0e45a79276a31ed0813b1eeef69a96b1",
         )
-        self.assertEqual(binding["readback"], "EXACT_BYTES_VERIFIED")
         self.assertEqual(
-            binding["release_authorization"]["status"],
-            "AUTHORIZED_PROTECTED_MAIN",
+            binding["status"], "SOURCE_BINDING_UNVERIFIED_CONTRADICTED"
         )
+        self.assertEqual(
+            binding["live_artifact_status"],
+            "IMMUTABLE_BYTES_AND_CPU_PROBES_VERIFIED",
+        )
+        self.assertEqual(
+            verifier.validate_source_binding(contract),
+            ["build/torch-cpu/szl_kernels/_chain.py"],
+        )
+
+        unsupported = copy.deepcopy(contract)
+        unsupported["source_binding"]["status"] = "SOURCE_BOUND_AUTHORIZED_RELEASE"
+        with self.assertRaisesRegex(ValueError, "qualification contradicted"):
+            verifier.validate_source_binding(unsupported)
+
+    def test_historical_receipt_bytes_are_immutable(self) -> None:
+        receipt = ROOT / "evidence" / "kernel-selfcheck-20260726.json"
+        canonical = receipt.read_text(encoding="utf-8").encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(canonical).hexdigest(),
+            "36bc2970b2722433f49329475251ba190cb035ddc5599e12db6cbaa4774b707b",
+        )
+
+    def test_receipt_writer_is_create_only_or_exact_noop(self) -> None:
+        checked = json.loads(
+            (ROOT / "evidence" / "kernel-selfcheck-20260808.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        results = []
+        for row in checked["results"]:
+            result = copy.deepcopy(row)
+            for key in ("id", "revision", "tree_digest_sha256"):
+                result.pop(key)
+            results.append(result)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "receipt.json"
+            verifier.write_receipt(path, self.contracts, results)
+            original = path.read_bytes()
+            verifier.write_receipt(path, self.contracts, results)
+            self.assertEqual(path.read_bytes(), original)
+            path.write_text("tampered\n", encoding="utf-8")
+            with self.assertRaisesRegex(FileExistsError, "refusing to overwrite"):
+                verifier.write_receipt(path, self.contracts, results)
+
+    def test_pr_ci_checks_out_and_attests_the_exact_head(self) -> None:
+        workflow = (
+            ROOT / ".github" / "workflows" / "kernel-contracts.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("github.event.pull_request.head.sha", workflow)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"', workflow)
+        self.assertIn('--source-sha "$(git rev-parse HEAD)"', workflow)
 
 
 if __name__ == "__main__":
