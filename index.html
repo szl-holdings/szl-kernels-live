@@ -301,8 +301,9 @@
       <p>
         The flagship direction is the unified <strong>szl-kernels</strong>
         suite. Two dedicated artifacts are retained for compatibility. Seven
-        kernels still have an open exact-GitHub-source binding; their immutable
-        Hugging Face code is inspectable, but this interface does not invent
+        portfolio entries are not exact-source-bound: six bindings remain open,
+        and the unified suite binding is contradicted by immutable readback.
+        Three entries remain related-source only; this interface does not invent
         provenance that has not been established.
       </p>
     </section>
@@ -434,8 +435,23 @@
         })
       ])
         .then(([index, receipt]) => {
+          if (!Array.isArray(index.kernels)) {
+            throw new Error("Contract index has no kernel rows");
+          }
+          return Promise.all(
+            index.kernels.map((row) =>
+              fetch(`contracts/${row.contract}`).then((response) => {
+                if (!response.ok) {
+                  throw new Error(`Contract ${row.id} HTTP ${response.status}`);
+                }
+                return response.json();
+              }),
+            ),
+          ).then((contracts) => [index, receipt, contracts]);
+        })
+        .then(([index, receipt, contracts]) => {
           const rows = index.kernels;
-          const passed = validateSnapshot(index, receipt);
+          const passed = validateSnapshot(index, receipt, contracts);
           document.querySelector("#kernel-count").textContent = String(rows.length);
           document.querySelector("#pass-count").textContent =
             `${receipt.summary.passed}/${receipt.summary.kernels}`;

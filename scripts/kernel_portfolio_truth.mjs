@@ -1,6 +1,12 @@
 const SHA40 = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const RESULT_STATES = new Set(["PASS", "FAIL"]);
+const SOURCE_BINDING_STATUSES = new Set([
+  "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+  "RELATED_GITHUB_SOURCE",
+  "SOURCE_BOUND_AUTHORIZED_RELEASE",
+  "SOURCE_BINDING_UNVERIFIED_CONTRADICTED",
+]);
 
 function exactKeys(value, expected, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -13,12 +19,15 @@ function exactKeys(value, expected, label) {
   }
 }
 
-export function validateSnapshot(index, receipt) {
+export function validateSnapshot(index, receipt, contracts) {
   if (!index || !Array.isArray(index.kernels) || !index.kernels.length) {
     throw new Error("contract index has no kernels");
   }
   if (!receipt || !Array.isArray(receipt.results)) {
     throw new Error("receipt has no results");
+  }
+  if (!Array.isArray(contracts) || contracts.length !== index.kernels.length) {
+    throw new Error("authoritative contract set does not match the index");
   }
   if (
     typeof index.recorded_at !== "string" ||
@@ -45,6 +54,19 @@ export function validateSnapshot(index, receipt) {
     resultById.set(result.id, result);
   }
 
+  const contractById = new Map();
+  for (const contract of contracts) {
+    const id = contract?.id;
+    const sourceStatus = contract?.source_binding?.status;
+    if (typeof id !== "string" || contractById.has(id)) {
+      throw new Error("contract IDs must be unique non-empty strings");
+    }
+    if (!SOURCE_BINDING_STATUSES.has(sourceStatus)) {
+      throw new Error(`contract ${id} has an unsupported source status`);
+    }
+    contractById.set(id, contract);
+  }
+
   const indexIds = new Set();
   const statuses = new Map();
   for (const row of index.kernels) {
@@ -52,6 +74,16 @@ export function validateSnapshot(index, receipt) {
       throw new Error("contract index IDs must be unique non-empty strings");
     }
     indexIds.add(row.id);
+    if (!SOURCE_BINDING_STATUSES.has(row.source_status)) {
+      throw new Error(`contract index ${row.id} has an unsupported source status`);
+    }
+    const contract = contractById.get(row.id);
+    if (!contract) {
+      throw new Error(`authoritative contract set is missing ${row.id}`);
+    }
+    if (row.source_status !== contract.source_binding.status) {
+      throw new Error(`contract index source status diverges from ${row.id}`);
+    }
     const result = resultById.get(row.id);
     if (!result) {
       throw new Error(`receipt is missing ${row.id}`);
@@ -66,6 +98,9 @@ export function validateSnapshot(index, receipt) {
   }
   if (resultById.size !== indexIds.size) {
     throw new Error("receipt and contract index ID sets do not match");
+  }
+  if (contractById.size !== indexIds.size) {
+    throw new Error("contract and index ID sets do not match");
   }
 
   const summary = {

@@ -18,6 +18,219 @@
     "schema_version": {"const": "1.0.0"},
     "id": {"type": "string", "pattern": "^SZLHOLDINGS/[A-Za-z0-9._-]+$"},
     "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "source_binding": {
+      "type": "object",
+      "required": ["status", "repository", "revision", "path"],
+      "properties": {
+        "status": {
+          "enum": [
+            "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+            "RELATED_GITHUB_SOURCE",
+            "SOURCE_BOUND_AUTHORIZED_RELEASE",
+            "SOURCE_BINDING_UNVERIFIED_CONTRADICTED"
+          ]
+        },
+        "repository": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "revision": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "path": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+        },
+        "hf_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "live_artifact_status": {
+          "const": "IMMUTABLE_BYTES_AND_CPU_PROBES_VERIFIED"
+        },
+        "source_binding_status": {"const": "UNVERIFIED_CONTRADICTED"},
+        "reason": {"type": "string", "minLength": 1},
+        "file_mapping": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "source_path",
+              "artifact_path",
+              "source_size",
+              "source_sha256",
+              "artifact_size",
+              "artifact_sha256",
+              "status"
+            ],
+            "properties": {
+              "source_path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+              },
+              "artifact_path": {
+                "type": "string",
+                "pattern": "^build/torch-cpu/[A-Za-z0-9._/-]+$"
+              },
+              "source_size": {"type": "integer", "minimum": 0},
+              "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_size": {"type": "integer", "minimum": 0},
+              "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "status": {"enum": ["MATCH", "MISMATCH"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "historical_release_attempt": {
+          "type": "object",
+          "required": [
+            "status",
+            "publisher_repository",
+            "publisher_revision",
+            "publisher_run",
+            "publication_manifest",
+            "source_checks_run",
+            "declared_artifact_tree_sha256",
+            "declared_binding_sha256",
+            "declared_readback",
+            "never_resend_run"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "SOURCE_BOUND_AUTHORIZED_RELEASE",
+                "CONTRADICTED_BY_IMMUTABLE_READBACK"
+              ]
+            },
+            "publisher_repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "publisher_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "publisher_run": {
+              "type": "string",
+              "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$"
+            },
+            "publication_manifest": {
+              "type": "string",
+              "pattern": "^https://huggingface\\.co/[^/]+/[^/]+/resolve/[0-9a-f]{40}/[^?#]+$"
+            },
+            "source_checks_run": {
+              "type": "string",
+              "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$"
+            },
+            "declared_artifact_tree_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "declared_binding_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "declared_readback": {"const": "EXACT_BYTES_VERIFIED"},
+            "never_resend_run": {"type": "string", "pattern": "^[1-9][0-9]*$"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "status": {"const": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN"},
+            "repository": {"type": "null"},
+            "revision": {"type": "null"},
+            "path": {"type": "null"}
+          },
+          "not": {
+            "anyOf": [
+              {"required": ["hf_revision"]},
+              {"required": ["live_artifact_status"]},
+              {"required": ["source_binding_status"]},
+              {"required": ["reason"]},
+              {"required": ["file_mapping"]},
+              {"required": ["historical_release_attempt"]}
+            ]
+          }
+        },
+        {
+          "properties": {
+            "status": {"const": "RELATED_GITHUB_SOURCE"},
+            "repository": {"type": "string"},
+            "revision": {"type": "string"},
+            "path": {"type": "string"}
+          },
+          "not": {
+            "anyOf": [
+              {"required": ["hf_revision"]},
+              {"required": ["live_artifact_status"]},
+              {"required": ["source_binding_status"]},
+              {"required": ["reason"]},
+              {"required": ["file_mapping"]},
+              {"required": ["historical_release_attempt"]}
+            ]
+          }
+        },
+        {
+          "required": ["hf_revision", "file_mapping", "historical_release_attempt"],
+          "properties": {
+            "status": {"const": "SOURCE_BOUND_AUTHORIZED_RELEASE"},
+            "repository": {"type": "string"},
+            "revision": {"type": "string"},
+            "path": {"type": "string"},
+            "file_mapping": {
+              "not": {
+                "contains": {
+                  "type": "object",
+                  "required": ["status"],
+                  "properties": {"status": {"const": "MISMATCH"}}
+                }
+              }
+            },
+            "historical_release_attempt": {
+              "properties": {
+                "status": {"const": "SOURCE_BOUND_AUTHORIZED_RELEASE"}
+              }
+            }
+          },
+          "not": {
+            "anyOf": [
+              {"required": ["live_artifact_status"]},
+              {"required": ["source_binding_status"]},
+              {"required": ["reason"]}
+            ]
+          }
+        },
+        {
+          "required": [
+            "hf_revision",
+            "live_artifact_status",
+            "source_binding_status",
+            "reason",
+            "file_mapping",
+            "historical_release_attempt"
+          ],
+          "properties": {
+            "status": {"const": "SOURCE_BINDING_UNVERIFIED_CONTRADICTED"},
+            "repository": {"type": "string"},
+            "revision": {"type": "string"},
+            "path": {"type": "string"},
+            "file_mapping": {
+              "contains": {
+                "type": "object",
+                "required": ["status"],
+                "properties": {"status": {"const": "MISMATCH"}}
+              }
+            },
+            "historical_release_attempt": {
+              "properties": {
+                "status": {"const": "CONTRADICTED_BY_IMMUTABLE_READBACK"}
+              }
+            }
+          }
+        }
+      ]
+    },
     "artifact": {
       "type": "object",
       "required": ["repo_type", "build", "files", "tree_digest_sha256"],

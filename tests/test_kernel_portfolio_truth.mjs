@@ -17,9 +17,20 @@ function fixture() {
     index: {
       recorded_at: "2026-07-26T03:00:00Z",
       kernels: [
-        { id: "SZLHOLDINGS/example", revision: REVISION_A, tree_digest_sha256: DIGEST_A },
+        {
+          id: "SZLHOLDINGS/example",
+          revision: REVISION_A,
+          tree_digest_sha256: DIGEST_A,
+          source_status: "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+        },
       ],
     },
+    contracts: [
+      {
+        id: "SZLHOLDINGS/example",
+        source_binding: { status: "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN" },
+      },
+    ],
     receipt: {
       recorded_at: "2026-07-26T03:00:00Z",
       summary: { kernels: 1, passed: 1, failed: 0 },
@@ -42,15 +53,21 @@ test("checked-in snapshot is an exact ten-kernel PASS vector", () => {
   const receipt = JSON.parse(
     fs.readFileSync(`evidence/kernel-selfcheck-${receiptDate}.json`, "utf8"),
   );
-  const statuses = validateSnapshot(index, receipt);
+  const contracts = index.kernels.map((row) =>
+    JSON.parse(fs.readFileSync(`contracts/${row.contract}`, "utf8")),
+  );
+  const statuses = validateSnapshot(index, receipt, contracts);
   assert.equal(statuses.size, 10);
   assert.deepEqual(new Set(statuses.keys()), new Set(index.kernels.map((row) => row.id)));
   assert.ok([...statuses.values()].every((status) => status === "PASS"));
 });
 
 test("snapshot PASS is bound to exact revision, digest, time, IDs, and summary", () => {
-  const { index, receipt } = fixture();
-  assert.equal(validateSnapshot(index, receipt).get("SZLHOLDINGS/example"), "PASS");
+  const { index, receipt, contracts } = fixture();
+  assert.equal(
+    validateSnapshot(index, receipt, contracts).get("SZLHOLDINGS/example"),
+    "PASS",
+  );
   for (const mutate of [
     (value) => { value.index.kernels[0].revision = REVISION_B; },
     (value) => { value.index.kernels[0].tree_digest_sha256 = "2".repeat(64); },
@@ -60,8 +77,36 @@ test("snapshot PASS is bound to exact revision, digest, time, IDs, and summary",
   ]) {
     const value = structuredClone(fixture());
     mutate(value);
-    assert.throws(() => validateSnapshot(value.index, value.receipt));
+    assert.throws(() => validateSnapshot(value.index, value.receipt, value.contracts));
   }
+});
+
+test("browser truth rejects index relabels and invented source states", () => {
+  const relabeled = structuredClone(fixture());
+  relabeled.index.kernels[0].source_status = "RELATED_GITHUB_SOURCE";
+  assert.throws(
+    () => validateSnapshot(relabeled.index, relabeled.receipt, relabeled.contracts),
+    /source status diverges/,
+  );
+
+  const inventedIndex = structuredClone(fixture());
+  inventedIndex.index.kernels[0].source_status = "INVENTED_SOURCE_QUALIFICATION";
+  assert.throws(
+    () => validateSnapshot(inventedIndex.index, inventedIndex.receipt, inventedIndex.contracts),
+    /unsupported source status/,
+  );
+
+  const inventedContract = structuredClone(fixture());
+  inventedContract.contracts[0].source_binding.status =
+    "INVENTED_SOURCE_QUALIFICATION";
+  assert.throws(
+    () => validateSnapshot(
+      inventedContract.index,
+      inventedContract.receipt,
+      inventedContract.contracts,
+    ),
+    /unsupported source status/,
+  );
 });
 
 test("live head requires a valid observed 40-character SHA", () => {

@@ -23,8 +23,18 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS_DIR = ROOT / "contracts"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+OPEN_SOURCE_STATUS = "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN"
+RELATED_SOURCE_STATUS = "RELATED_GITHUB_SOURCE"
 SOURCE_BOUND_STATUS = "SOURCE_BOUND_AUTHORIZED_RELEASE"
 CONTRADICTED_STATUS = "SOURCE_BINDING_UNVERIFIED_CONTRADICTED"
+SOURCE_BINDING_STATUSES = frozenset(
+    {
+        OPEN_SOURCE_STATUS,
+        RELATED_SOURCE_STATUS,
+        SOURCE_BOUND_STATUS,
+        CONTRADICTED_STATUS,
+    }
+)
 
 
 def normalize_recorded_at(value: str) -> str:
@@ -141,11 +151,18 @@ def validate_contract(contract: dict) -> None:
 
 def validate_source_binding(contract: dict) -> list[str]:
     binding = contract.get("source_binding", {})
+    if not isinstance(binding, dict):
+        raise ValueError(f"{contract.get('id')}: source binding must be an object")
+    status = binding.get("status")
+    if status not in SOURCE_BINDING_STATUSES:
+        raise ValueError(
+            f"{contract.get('id')}: unsupported source binding status {status!r}"
+        )
     mappings = binding.get("file_mapping")
     if mappings is None:
-        if binding.get("status") == SOURCE_BOUND_STATUS:
+        if status in {SOURCE_BOUND_STATUS, CONTRADICTED_STATUS}:
             raise ValueError(
-                f"{contract.get('id')}: source-bound status requires byte mappings"
+                f"{contract.get('id')}: {status} requires byte mappings"
             )
         return []
     if not isinstance(mappings, list) or not mappings:
@@ -197,7 +214,6 @@ def validate_source_binding(contract: dict) -> list[str]:
         if mismatch:
             mismatches.append(artifact_path)
 
-    status = binding.get("status")
     if status == SOURCE_BOUND_STATUS and mismatches:
         raise ValueError(
             f"{contract.get('id')}: source-bound qualification contradicted by "
@@ -216,6 +232,25 @@ def validate_source_binding(contract: dict) -> list[str]:
     elif mappings and status != SOURCE_BOUND_STATUS:
         raise ValueError(f"{contract.get('id')}: unsupported mapped source status")
     return mismatches
+
+
+def validate_index_source_status(row: dict, contract: dict) -> None:
+    kernel_id = contract.get("id")
+    source_status = row.get("source_status")
+    if source_status not in SOURCE_BINDING_STATUSES:
+        raise ValueError(
+            f"{kernel_id}: unsupported index source status {source_status!r}"
+        )
+    authoritative = contract.get("source_binding", {}).get("status")
+    if authoritative not in SOURCE_BINDING_STATUSES:
+        raise ValueError(
+            f"{kernel_id}: unsupported contract source status {authoritative!r}"
+        )
+    if source_status != authoritative:
+        raise ValueError(
+            f"{kernel_id}: index source status {source_status!r} differs from "
+            f"authoritative contract status {authoritative!r}"
+        )
 
 
 def verify_declared_source(contract: dict) -> None:
@@ -287,6 +322,7 @@ def load_contracts(contracts_dir: Path) -> list[dict]:
         path = contracts_dir / row["contract"]
         contract = json.loads(path.read_text(encoding="utf-8"))
         validate_contract(contract)
+        validate_index_source_status(row, contract)
         if contract["id"] in seen:
             raise ValueError(f"duplicate contract id {contract['id']}")
         if (
@@ -481,7 +517,10 @@ def main() -> int:
     parser.add_argument("--receipt", type=Path)
     parser.add_argument(
         "--recorded-at",
-        help="exact UTC receipt timestamp; defaults to the current UTC second",
+        help=(
+            "exact UTC receipt timestamp; must match the shared contract timestamp "
+            "and defaults to that timestamp"
+        ),
     )
     args = parser.parse_args()
 
