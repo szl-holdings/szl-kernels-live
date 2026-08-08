@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "portfolio": "SZLHOLDINGS governed kernels",
-  "recorded_at": "2026-07-26T03:00:00Z",
+  "recorded_at": "2026-08-08T21:02:39Z",
   "doctrine": {
     "runtime_claim": "CPU import/self-check evidence only unless a contract states otherwise",
     "lambda_status": "Conjecture 1 (open); advisory only",
@@ -42,7 +42,7 @@
       "slug": "szl-kernels",
       "title": "Unified governed-kernel suite",
       "summary": "Cross-kernel CPU suite for normalization, advisory Lambda gating, energy honesty, and receipt chaining.",
-      "revision": "06cc46f9733a844ee1c4cab558b06b3bd2d377ea",
+      "revision": "95f74bc6720cf95953b15cc6a454ee4d21dcf107",
       "packages": ["szl_kernels"],
       "dependencies": ["torch"],
       "probe": {
@@ -54,10 +54,55 @@
       },
       "portfolio_status": "FLAGSHIP_EXPERIMENTAL",
       "source_binding": {
-        "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
-        "repository": null,
-        "revision": null,
-        "path": null
+        "status": "SOURCE_BINDING_UNVERIFIED_CONTRADICTED",
+        "live_artifact_status": "IMMUTABLE_BYTES_AND_CPU_PROBES_VERIFIED",
+        "source_binding_status": "UNVERIFIED_CONTRADICTED",
+        "repository": "szl-holdings/szl-kernels",
+        "revision": "8fa0e9fe0e45a79276a31ed0813b1eeef69a96b1",
+        "path": "build/torch-universal/szl_kernels",
+        "hf_revision": "95f74bc6720cf95953b15cc6a454ee4d21dcf107",
+        "reason": "The immutable live _chain.py differs from the protected source and the publication manifest; CPU behavior remains independently measured but exact source binding is not established.",
+        "file_mapping": [
+          {
+            "source_path": "build/torch-universal/szl_kernels/__init__.py",
+            "artifact_path": "build/torch-cpu/szl_kernels/__init__.py",
+            "source_size": 11106,
+            "source_sha256": "96caac81dd719c785c9cb1458ac835352a8b45cbce7a5603a205b3a88319bbf0",
+            "artifact_size": 11106,
+            "artifact_sha256": "96caac81dd719c785c9cb1458ac835352a8b45cbce7a5603a205b3a88319bbf0",
+            "status": "MATCH"
+          },
+          {
+            "source_path": "build/torch-universal/szl_kernels/_chain.py",
+            "artifact_path": "build/torch-cpu/szl_kernels/_chain.py",
+            "source_size": 11672,
+            "source_sha256": "5ffd4e581ad99ca23d2c90fdd81e7106d879211e3d1f965e210dbf44b008b5de",
+            "artifact_size": 11489,
+            "artifact_sha256": "822f24ad04bfac3a6662d79ee01807f2c6a6379b096dad20b10b80d83c7bdbb2",
+            "status": "MISMATCH"
+          },
+          {
+            "source_path": "build/torch-universal/szl_kernels/_ops.py",
+            "artifact_path": "build/torch-cpu/szl_kernels/_ops.py",
+            "source_size": 9058,
+            "source_sha256": "7eb0ca4c11308c7b16df0e7bdd35cbed6b1464ca9f05c9acd925a2f0154130bd",
+            "artifact_size": 9058,
+            "artifact_sha256": "7eb0ca4c11308c7b16df0e7bdd35cbed6b1464ca9f05c9acd925a2f0154130bd",
+            "status": "MATCH"
+          }
+        ],
+        "historical_release_attempt": {
+          "status": "CONTRADICTED_BY_IMMUTABLE_READBACK",
+          "publisher_repository": "szl-holdings/szl-forge",
+          "publisher_revision": "99800a1a4d2cb7d87a1d8d6f13e13537297a430d",
+          "publisher_run": "https://github.com/szl-holdings/szl-forge/actions/runs/30721609223",
+          "publication_manifest": "https://huggingface.co/SZLHOLDINGS/szl-kernels/resolve/6b83d1bf378db24cd8a5a7dd815d28f7a6404cd8/publication.json",
+          "source_checks_run": "https://github.com/szl-holdings/szl-kernels/actions/runs/30718336607",
+          "declared_artifact_tree_sha256": "05e152e76cd3e481cdb53835e4805a58796e4418dc8ff62fb6bb723aed153e00",
+          "declared_binding_sha256": "ad24c91123cde50acc6192daf23a3d7832fbc3ca38f1e96196865ba8a3ea4add",
+          "declared_readback": "EXACT_BYTES_VERIFIED",
+          "never_resend_run": "30721609223"
+        }
       },
       "limitations": [
         "The bundled self-check is a functional check, not a throughput or accuracy benchmark.",

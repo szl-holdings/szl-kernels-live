@@ -262,13 +262,13 @@
       <a class="button" href="#evaluator">Evaluator path</a>
     </div>
     <section class="provenance" aria-label="Evidence identity and provenance">
-      <div><strong>RECORDED SNAPSHOT</strong><span>CPU import/probe evidence was captured on 2026-07-26; it is not a continuously running benchmark.</span></div>
+      <div><strong>RECORDED SNAPSHOT</strong><span>CPU import/probe evidence was captured on 2026-08-08; it is not a continuously running benchmark.</span></div>
       <div><strong>LIVE-HEAD CHECK</strong><span>This browser compares current public Hugging Face heads with reviewed immutable pins. Failure remains HEAD UNAVAILABLE.</span></div>
       <div><strong>SOURCE-BOUND RELEASE</strong><span>The guarded workflow records the GitHub SHA and bundle digests in the published Space provenance files.</span></div>
     </section>
     <div class="metric-grid" aria-label="Verified portfolio metrics">
       <div class="metric"><strong id="kernel-count">—</strong><span>recorded immutable kernel contracts</span></div>
-      <div class="metric"><strong id="pass-count">—</strong><span>2026-07-26 revision-pinned CPU imports and probes</span></div>
+        <div class="metric"><strong id="pass-count">—</strong><span>2026-08-08 revision-pinned CPU imports and probes</span></div>
       <div class="metric"><strong>0</strong><span>driver families inferred</span></div>
       <div class="metric"><strong id="head-count">—</strong><span id="head-detail">live-head checks pending</span></div>
     </div>
@@ -301,8 +301,9 @@
       <p>
         The flagship direction is the unified <strong>szl-kernels</strong>
         suite. Two dedicated artifacts are retained for compatibility. Seven
-        kernels still have an open exact-GitHub-source binding; their immutable
-        Hugging Face code is inspectable, but this interface does not invent
+        portfolio entries are not exact-source-bound: six bindings remain open,
+        and the unified suite binding is contradicted by immutable readback.
+        Three entries remain related-source only; this interface does not invent
         provenance that has not been established.
       </p>
     </section>
@@ -314,7 +315,7 @@
     unknown state remains unknown.
     <div class="links" style="margin-top:10px">
       <a href="contracts/index.json">Contract index</a>
-      <a href="evidence/kernel-selfcheck-20260726.json">Measured receipt</a>
+        <a href="evidence/kernel-selfcheck-20260808.json">Measured receipt</a>
       <a href="schemas/kernel-contract.schema.json">Contract schema</a>
       <a href="SPACE_PROVENANCE.json">Published Space provenance</a>
       <a href="hf-deploy-manifest.json">Published bundle manifest</a>
@@ -428,14 +429,29 @@
           if (!response.ok) throw new Error(`Contract index HTTP ${response.status}`);
           return response.json();
         }),
-        fetch("evidence/kernel-selfcheck-20260726.json").then((response) => {
+        fetch("evidence/kernel-selfcheck-20260808.json").then((response) => {
           if (!response.ok) throw new Error(`Receipt HTTP ${response.status}`);
           return response.json();
         })
       ])
         .then(([index, receipt]) => {
+          if (!Array.isArray(index.kernels)) {
+            throw new Error("Contract index has no kernel rows");
+          }
+          return Promise.all(
+            index.kernels.map((row) =>
+              fetch(`contracts/${row.contract}`).then((response) => {
+                if (!response.ok) {
+                  throw new Error(`Contract ${row.id} HTTP ${response.status}`);
+                }
+                return response.json();
+              }),
+            ),
+          ).then((contracts) => [index, receipt, contracts]);
+        })
+        .then(([index, receipt, contracts]) => {
           const rows = index.kernels;
-          const passed = validateSnapshot(index, receipt);
+          const passed = validateSnapshot(index, receipt, contracts);
           document.querySelector("#kernel-count").textContent = String(rows.length);
           document.querySelector("#pass-count").textContent =
             `${receipt.summary.passed}/${receipt.summary.kernels}`;
@@ -481,7 +497,7 @@
           });
           grid.setAttribute("aria-busy", "false");
           status.textContent =
-            `Loaded ${rows.length} recorded contracts from the 2026-07-26 snapshot. Live-head checks run independently.`;
+            `Loaded ${rows.length} recorded contracts from the 2026-08-08 snapshot. Live-head checks run independently.`;
         })
         .catch((error) => {
           grid.setAttribute("aria-busy", "false");

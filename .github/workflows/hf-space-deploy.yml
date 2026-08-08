@@ -12,8 +12,14 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Checkout exact protected-main event
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
@@ -26,6 +32,7 @@ jobs:
           node --test tests/test_kernel_portfolio_truth.mjs
       - name: Build source-bound Space bundle
         run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python scripts/build_hf_space_bundle.py \
             --output "$RUNNER_TEMP/hf-bundle" \
             --source-sha "$GITHUB_SHA" \
@@ -52,9 +59,25 @@ jobs:
           printf 'Protected main remains exact at %s\n' "$live_sha"
       - name: Publish exact protected-main bundle
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          set -euo pipefail
           test -n "$HF_TOKEN"
           python scripts/deploy_hf_space.py \
             --bundle "$RUNNER_TEMP/hf-bundle" \
-            --source-sha "$GITHUB_SHA"
+            --source-sha "$GITHUB_SHA" \
+            --result "$RUNNER_TEMP/hf-deploy-result.json" \
+            --attestation "$RUNNER_TEMP/hf-live-attestation.json"
+      - name: Upload immutable deployment evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hf-space-deployment-evidence
+          path: |
+            ${{ runner.temp }}/hf-bundle/hf-deploy-manifest.json
+            ${{ runner.temp }}/hf-bundle/SPACE_PROVENANCE.json
+            ${{ runner.temp }}/hf-deploy-result.json
+            ${{ runner.temp }}/hf-live-attestation.json
+          if-no-files-found: warn
+          retention-days: 90

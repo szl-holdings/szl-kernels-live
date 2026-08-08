@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0.0",
-  "recorded_at": "2026-07-26T03:00:00Z",
+  "recorded_at": "2026-08-08T21:02:39Z",
   "doctrine": {
     "runtime_claim": "CPU import/self-check evidence only unless a contract states otherwise",
     "lambda_status": "Conjecture 1 (open); advisory only",
@@ -29,10 +29,10 @@
       "slug": "szl-kernels",
       "title": "Unified governed-kernel suite",
       "summary": "Cross-kernel CPU suite for normalization, advisory Lambda gating, energy honesty, and receipt chaining.",
-      "revision": "06cc46f9733a844ee1c4cab558b06b3bd2d377ea",
-      "tree_digest_sha256": "476a8e5db423726f297473afad1df2f76bdbdc74d5aced86ad94572f0cf82892",
+      "revision": "95f74bc6720cf95953b15cc6a454ee4d21dcf107",
+      "tree_digest_sha256": "3aedfbe0f103c4ee37326a5d8c19f663a0bf68871816c0b54ea5686965575af5",
       "portfolio_status": "FLAGSHIP_EXPERIMENTAL",
-      "source_status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
+      "source_status": "SOURCE_BINDING_UNVERIFIED_CONTRADICTED",
       "contract": "szl-kernels/contract.json",
       "limitations": [
         "The bundled self-check is a functional check, not a throughput or accuracy benchmark.",

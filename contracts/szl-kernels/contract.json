@@ -4,45 +4,45 @@
   "id": "SZLHOLDINGS/szl-kernels",
   "title": "Unified governed-kernel suite",
   "summary": "Cross-kernel CPU suite for normalization, advisory Lambda gating, energy honesty, and receipt chaining.",
-  "revision": "06cc46f9733a844ee1c4cab558b06b3bd2d377ea",
-  "recorded_at": "2026-07-26T03:00:00Z",
+  "revision": "95f74bc6720cf95953b15cc6a454ee4d21dcf107",
+  "recorded_at": "2026-08-08T21:02:39Z",
   "artifact": {
     "repo_type": "kernel",
     "build": "torch-cpu",
-    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-kernels/tree/06cc46f9733a844ee1c4cab558b06b3bd2d377ea/build/torch-cpu",
+    "tree_url": "https://huggingface.co/kernels/SZLHOLDINGS/szl-kernels/tree/95f74bc6720cf95953b15cc6a454ee4d21dcf107/build/torch-cpu",
     "files": [
       {
         "path": "build/torch-cpu/metadata.json",
-        "size": 182,
-        "git_oid": "24b0b7f5eee2163491aea065d85260fedafee2dc",
-        "sha256": "646a38d97dfc43ae2e106b08e29278869bbe6fd6f860326eb943ee5a9220eccb"
+        "size": 559,
+        "git_oid": "39be9725420cfbd0c5d5ad8e42823dad8ac580e6",
+        "sha256": "f9546c142435ed0f8706e763d69b6aefc1d1904761f10404647e36512bd74ad8"
       },
       {
         "path": "build/torch-cpu/szl_kernels/__init__.py",
-        "size": 11363,
-        "git_oid": "6c0496ccedc3f016432dd8ed571250d9985f2247",
-        "sha256": "2985924bcc448aa9d54ae0273aa8e85a739fc98433415aaef2a868d144a095fb"
+        "size": 11106,
+        "git_oid": "38b0a97560c51e88e2d91d8b366dee2f74813ee6",
+        "sha256": "96caac81dd719c785c9cb1458ac835352a8b45cbce7a5603a205b3a88319bbf0"
       },
       {
         "path": "build/torch-cpu/szl_kernels/_chain.py",
-        "size": 11754,
-        "git_oid": "739f722fe59b56ec5b251c944012b157825ff063",
-        "sha256": "daa0e96ca4175f619f05704bb0c328b85237e0690666508b87b1ffe9a2460f28"
+        "size": 11489,
+        "git_oid": "3269bd1ce2013d6fe63df8c95a6f8e120399a921",
+        "sha256": "822f24ad04bfac3a6662d79ee01807f2c6a6379b096dad20b10b80d83c7bdbb2"
       },
       {
         "path": "build/torch-cpu/szl_kernels/_ops.py",
-        "size": 9079,
-        "git_oid": "69ee5d570a9b91db4c037c89ee9ed32acb57729e",
-        "sha256": "e2ebb90d1a8e5c6a76914a3b44b267ae6d1fafb1d754dd69293a05abd6c40ebf"
+        "size": 9058,
+        "git_oid": "d10ef5a7bc5a40c94a801a1a09832ce4a895fd20",
+        "sha256": "7eb0ca4c11308c7b16df0e7bdd35cbed6b1464ca9f05c9acd925a2f0154130bd"
       }
     ],
-    "tree_digest_sha256": "476a8e5db423726f297473afad1df2f76bdbdc74d5aced86ad94572f0cf82892"
+    "tree_digest_sha256": "3aedfbe0f103c4ee37326a5d8c19f663a0bf68871816c0b54ea5686965575af5"
   },
   "loading": {
     "method": "kernels.get_kernel",
     "trust_remote_code": true,
     "revision_required": true,
-    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-kernels\", revision=\"06cc46f9733a844ee1c4cab558b06b3bd2d377ea\", trust_remote_code=True)"
+    "example": "from kernels import get_kernel\nkernel = get_kernel(\"SZLHOLDINGS/szl-kernels\", revision=\"95f74bc6720cf95953b15cc6a454ee4d21dcf107\", trust_remote_code=True)"
   },
   "runtime": {
     "classification": "PYTHON_GOVERNANCE_KERNEL",
@@ -58,8 +58,8 @@
     "hf_declared_driver_families": [],
     "measured_compatibility": {
       "status": "MEASURED",
-      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
-      "environment": "Windows amd64, Python 3.11, CPU execution"
+      "receipt": "../../evidence/kernel-selfcheck-20260808.json",
+      "environment": "See the bound receipt for the measured CPU environment"
     }
   },
   "probe": {
@@ -74,10 +74,55 @@
     ]
   },
   "source_binding": {
-    "status": "HF_REVISION_PINNED_GITHUB_SOURCE_OPEN",
-    "repository": null,
-    "revision": null,
-    "path": null
+    "status": "SOURCE_BINDING_UNVERIFIED_CONTRADICTED",
+    "live_artifact_status": "IMMUTABLE_BYTES_AND_CPU_PROBES_VERIFIED",
+    "source_binding_status": "UNVERIFIED_CONTRADICTED",
+    "repository": "szl-holdings/szl-kernels",
+    "revision": "8fa0e9fe0e45a79276a31ed0813b1eeef69a96b1",
+    "path": "build/torch-universal/szl_kernels",
+    "hf_revision": "95f74bc6720cf95953b15cc6a454ee4d21dcf107",
+    "reason": "The immutable live _chain.py differs from the protected source and the publication manifest; CPU behavior remains independently measured but exact source binding is not established.",
+    "file_mapping": [
+      {
+        "source_path": "build/torch-universal/szl_kernels/__init__.py",
+        "artifact_path": "build/torch-cpu/szl_kernels/__init__.py",
+        "source_size": 11106,
+        "source_sha256": "96caac81dd719c785c9cb1458ac835352a8b45cbce7a5603a205b3a88319bbf0",
+        "artifact_size": 11106,
+        "artifact_sha256": "96caac81dd719c785c9cb1458ac835352a8b45cbce7a5603a205b3a88319bbf0",
+        "status": "MATCH"
+      },
+      {
+        "source_path": "build/torch-universal/szl_kernels/_chain.py",
+        "artifact_path": "build/torch-cpu/szl_kernels/_chain.py",
+        "source_size": 11672,
+        "source_sha256": "5ffd4e581ad99ca23d2c90fdd81e7106d879211e3d1f965e210dbf44b008b5de",
+        "artifact_size": 11489,
+        "artifact_sha256": "822f24ad04bfac3a6662d79ee01807f2c6a6379b096dad20b10b80d83c7bdbb2",
+        "status": "MISMATCH"
+      },
+      {
+        "source_path": "build/torch-universal/szl_kernels/_ops.py",
+        "artifact_path": "build/torch-cpu/szl_kernels/_ops.py",
+        "source_size": 9058,
+        "source_sha256": "7eb0ca4c11308c7b16df0e7bdd35cbed6b1464ca9f05c9acd925a2f0154130bd",
+        "artifact_size": 9058,
+        "artifact_sha256": "7eb0ca4c11308c7b16df0e7bdd35cbed6b1464ca9f05c9acd925a2f0154130bd",
+        "status": "MATCH"
+      }
+    ],
+    "historical_release_attempt": {
+      "status": "CONTRADICTED_BY_IMMUTABLE_READBACK",
+      "publisher_repository": "szl-holdings/szl-forge",
+      "publisher_revision": "99800a1a4d2cb7d87a1d8d6f13e13537297a430d",
+      "publisher_run": "https://github.com/szl-holdings/szl-forge/actions/runs/30721609223",
+      "publication_manifest": "https://huggingface.co/SZLHOLDINGS/szl-kernels/resolve/6b83d1bf378db24cd8a5a7dd815d28f7a6404cd8/publication.json",
+      "source_checks_run": "https://github.com/szl-holdings/szl-kernels/actions/runs/30718336607",
+      "declared_artifact_tree_sha256": "05e152e76cd3e481cdb53835e4805a58796e4418dc8ff62fb6bb723aed153e00",
+      "declared_binding_sha256": "ad24c91123cde50acc6192daf23a3d7832fbc3ca38f1e96196865ba8a3ea4add",
+      "declared_readback": "EXACT_BYTES_VERIFIED",
+      "never_resend_run": "30721609223"
+    }
   },
   "limitations": [
     "The bundled self-check is a functional check, not a throughput or accuracy benchmark.",

@@ -5,7 +5,7 @@
   "title": "Governed signature envelope",
   "summary": "DSSE-style governance predicate signing, verification, and tamper detection.",
   "revision": "8a99694472bab97b9e00bd3ef1a1fd73cfaabc4a",
-  "recorded_at": "2026-07-26T03:00:00Z",
+  "recorded_at": "2026-08-08T21:02:39Z",
   "artifact": {
     "repo_type": "kernel",
     "build": "torch-cpu",
@@ -70,8 +70,8 @@
     "hf_declared_driver_families": [],
     "measured_compatibility": {
       "status": "MEASURED",
-      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
-      "environment": "Windows amd64, Python 3.11, CPU execution"
+      "receipt": "../../evidence/kernel-selfcheck-20260808.json",
+      "environment": "See the bound receipt for the measured CPU environment"
     }
   },
   "probe": {

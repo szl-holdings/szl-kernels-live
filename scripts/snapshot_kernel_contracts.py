@@ -9,6 +9,7 @@ present in registry/kernel-pins.json and records their file digests.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -44,6 +45,14 @@ def canonical_json(value: object) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+
+
+def receipt_reference(recorded_at: str) -> str:
+    try:
+        recorded = datetime.strptime(recorded_at, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError) as error:
+        raise ValueError("recorded_at must be an exact UTC timestamp ending in Z") from error
+    return f"../../evidence/kernel-selfcheck-{recorded:%Y%m%d}.json"
 
 
 def load_pins() -> dict:
@@ -159,8 +168,8 @@ def snapshot_kernel(kernel: dict, recorded_at: str) -> dict:
             "hf_declared_driver_families": [],
             "measured_compatibility": {
                 "status": "MEASURED",
-                "receipt": "../../evidence/kernel-selfcheck-20260726.json",
-                "environment": "Windows amd64, Python 3.11, CPU execution",
+                "receipt": receipt_reference(recorded_at),
+                "environment": "See the bound receipt for the measured CPU environment",
             },
         },
         "probe": kernel["probe"],

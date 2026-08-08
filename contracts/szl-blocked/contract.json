@@ -5,7 +5,7 @@
   "title": "Fail-closed governed call",
   "summary": "Deny-by-default execution gate, hard security dominance, receipt chain, and Annex IV draft derivation.",
   "revision": "a6642f7346be5839049eb9a5e29361da18a12562",
-  "recorded_at": "2026-07-26T03:00:00Z",
+  "recorded_at": "2026-08-08T21:02:39Z",
   "artifact": {
     "repo_type": "kernel",
     "build": "torch-cpu",
@@ -75,8 +75,8 @@
     "hf_declared_driver_families": [],
     "measured_compatibility": {
       "status": "MEASURED",
-      "receipt": "../../evidence/kernel-selfcheck-20260726.json",
-      "environment": "Windows amd64, Python 3.11, CPU execution"
+      "receipt": "../../evidence/kernel-selfcheck-20260808.json",
+      "environment": "See the bound receipt for the measured CPU environment"
     }
   },
   "probe": {
