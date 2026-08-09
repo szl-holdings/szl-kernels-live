@@ -1553,12 +1553,29 @@ def _success_contract_violations(
         violations.append("measurement.tree_sha256")
 
     public_index = measurement.get("public_index")
-    if not isinstance(public_index, dict) or public_index.get("verified") is not True:
+    if (
+        not isinstance(public_index, dict)
+        or public_index.get("transformation")
+        != "HF_WINDOW_HUGGINGFACE_HEAD_INJECTION_V1"
+        or not isinstance(public_index.get("normalized_bytes"), int)
+        or isinstance(public_index.get("normalized_bytes"), bool)
+        or public_index["normalized_bytes"] < 0
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(public_index.get("normalized_sha256", ""))
+        )
+        or not isinstance(public_index.get("injection_bytes"), int)
+        or isinstance(public_index.get("injection_bytes"), bool)
+        or public_index["injection_bytes"] < 0
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(public_index.get("injection_sha256", ""))
+        )
+    ):
         violations.append("measurement.public_index_verified")
     post_publication_main = measurement.get("post_publication_main")
     if (
         not isinstance(post_publication_main, dict)
-        or post_publication_main.get("status") != "AUTHORIZED"
+        or post_publication_main.get("status")
+        != "AUTHORIZED_EXACT_PROTECTED_MAIN"
     ):
         violations.append("measurement.post_publication_main_authorized")
     public_provenance = measurement.get("public_provenance")

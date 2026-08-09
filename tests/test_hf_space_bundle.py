@@ -1349,14 +1349,22 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "bundle_sha256": "d" * 64,
                 "file_count": 10,
                 "tree_sha256": "e" * 64,
-                "public_index": {"verified": True},
+                "public_index": {
+                    "transformation": "HF_WINDOW_HUGGINGFACE_HEAD_INJECTION_V1",
+                    "normalized_bytes": 128,
+                    "normalized_sha256": "8" * 64,
+                    "injection_bytes": 64,
+                    "injection_sha256": "9" * 64,
+                },
                 "public_provenance": {
                     "verified": True,
                     "source_repository": SOURCE_REPO,
                     "source_revision": SOURCE_SHA,
                     "relation": SOURCE_RELATION,
                 },
-                "post_publication_main": {"status": "AUTHORIZED"},
+                "post_publication_main": {
+                    "status": "AUTHORIZED_EXACT_PROTECTED_MAIN"
+                },
                 "receipt_minted": False,
                 "deployment_success": False,
             }
@@ -1415,7 +1423,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
 
             contradictions = {
                 "public-index": lambda value: value["public_index"].update(
-                    {"verified": False}
+                    {"normalized_sha256": "not-a-digest"}
                 ),
                 "post-main": lambda value: value["post_publication_main"].update(
                     {"status": "UNAUTHORIZED"}
@@ -1588,14 +1596,22 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                         "bundle_sha256": "d" * 64,
                         "tree_sha256": "e" * 64,
                         "file_count": 10,
-                        "public_index": {"verified": True},
+                        "public_index": {
+                            "transformation": "HF_WINDOW_HUGGINGFACE_HEAD_INJECTION_V1",
+                            "normalized_bytes": 128,
+                            "normalized_sha256": "8" * 64,
+                            "injection_bytes": 64,
+                            "injection_sha256": "9" * 64,
+                        },
                         "public_provenance": {
                             "verified": True,
                             "source_repository": SOURCE_REPO,
                             "source_revision": SOURCE_SHA,
                             "relation": SOURCE_RELATION,
                         },
-                        "post_publication_main": {"status": "AUTHORIZED"},
+                        "post_publication_main": {
+                            "status": "AUTHORIZED_EXACT_PROTECTED_MAIN"
+                        },
                         "receipt_minted": False,
                         "deployment_success": False,
                     }
