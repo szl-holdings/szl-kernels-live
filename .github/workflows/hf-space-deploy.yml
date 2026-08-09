@@ -115,19 +115,28 @@ jobs:
             ${{ runner.temp }}/hf-live-attestation.json
           if-no-files-found: error
           retention-days: 90
-      - name: Attest final exact-revision receipt
-        id: oidc-receipt
+      - name: Synthesize deterministic canonical success receipt candidate
+        id: candidate-receipt
         if: steps.publish-measure.outcome == 'success' && steps.success-artifact.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/hf-terminal-candidate"
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py candidate-receipt \
+            --source-sha "$GITHUB_SHA" \
+            --result "$RUNNER_TEMP/hf-deploy-result.json" \
+            --measurement "$RUNNER_TEMP/hf-live-attestation.json" \
+            --output "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json"
+      - name: Attest canonical final success receipt bytes
+        id: oidc-receipt
+        if: steps.candidate-receipt.outcome == 'success'
         continue-on-error: true
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          subject-path: ${{ runner.temp }}/hf-live-attestation.json
-      - name: Synthesize canonical OIDC success receipt
-        id: final-receipt
-        if: >-
-          steps.publish-measure.outcome == 'success' &&
-          steps.success-artifact.outcome == 'success' &&
-          steps.oidc-receipt.outcome == 'success'
+          subject-path: ${{ runner.temp }}/hf-terminal-candidate/hf-canonical-success-receipt.json
+      - name: Promote attested receipt and bind separate metadata envelope
+        id: finalize-receipt
+        if: steps.oidc-receipt.outcome == 'success'
         continue-on-error: true
         env:
           ATTESTATION_ID: ${{ steps.oidc-receipt.outputs.attestation-id }}
@@ -138,23 +147,26 @@ jobs:
           test -n "$ATTESTATION_ID"
           test -n "$ATTESTATION_URL"
           test -f "$ATTESTATION_BUNDLE_PATH"
-          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py final-receipt \
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py finalize-receipt \
             --source-sha "$GITHUB_SHA" \
             --result "$RUNNER_TEMP/hf-deploy-result.json" \
             --measurement "$RUNNER_TEMP/hf-live-attestation.json" \
-            --output "$RUNNER_TEMP/hf-oidc-receipt.json" \
+            --candidate "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json" \
+            --output "$RUNNER_TEMP/hf-canonical-success-receipt.json" \
+            --envelope "$RUNNER_TEMP/hf-oidc-attestation-envelope.json" \
             --attestation-id "$ATTESTATION_ID" \
             --attestation-url "$ATTESTATION_URL" \
             --bundle-path "$ATTESTATION_BUNDLE_PATH"
       - name: Upload required terminal success evidence
         id: terminal-success-artifact
-        if: steps.final-receipt.outcome == 'success'
+        if: steps.finalize-receipt.outcome == 'success'
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hf-space-terminal-success-evidence
           path: |
-            ${{ runner.temp }}/hf-oidc-receipt.json
+            ${{ runner.temp }}/hf-canonical-success-receipt.json
+            ${{ runner.temp }}/hf-oidc-attestation-envelope.json
             ${{ steps.oidc-receipt.outputs.bundle-path }}
           if-no-files-found: error
           retention-days: 90
@@ -163,21 +175,29 @@ jobs:
         if: >-
           always() && steps.publish-measure.outcome == 'success' &&
           (steps.success-artifact.outcome != 'success' ||
+          steps.candidate-receipt.outcome != 'success' ||
           steps.oidc-receipt.outcome != 'success' ||
-          steps.final-receipt.outcome != 'success' ||
+          steps.finalize-receipt.outcome != 'success' ||
           steps.terminal-success-artifact.outcome != 'success')
         shell: bash
         run: |
+          set -euo pipefail
           failure_stage="OIDC_RECEIPT_ATTESTATION"
           if [ "${{ steps.success-artifact.outcome }}" != "success" ]; then
             failure_stage="SUCCESS_ARTIFACT_UPLOAD"
+          elif [ "${{ steps.candidate-receipt.outcome }}" != "success" ]; then
+            failure_stage="CANDIDATE_RECEIPT_SYNTHESIS"
           elif [ "${{ steps.oidc-receipt.outcome }}" != "success" ]; then
             failure_stage="OIDC_RECEIPT_ATTESTATION"
-          elif [ "${{ steps.final-receipt.outcome }}" != "success" ]; then
-            failure_stage="FINAL_RECEIPT_SYNTHESIS"
+          elif [ "${{ steps.finalize-receipt.outcome }}" != "success" ]; then
+            failure_stage="FINAL_RECEIPT_PROMOTION"
           else
             failure_stage="TERMINAL_SUCCESS_ARTIFACT"
           fi
+          rm -f \
+            "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json" \
+            "$RUNNER_TEMP/hf-canonical-success-receipt.json" \
+            "$RUNNER_TEMP/hf-oidc-attestation-envelope.json"
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py stage-failure \
             --source-sha "$GITHUB_SHA" \
             --result "$RUNNER_TEMP/hf-deploy-result.json" \
@@ -185,16 +205,29 @@ jobs:
             --failure-evidence "$RUNNER_TEMP/hf-receipt-stage-failure.json" \
             --failure-stage "$failure_stage" \
             --artifact-outcome "${{ steps.success-artifact.outcome }}" \
+            --candidate-receipt-outcome "${{ steps.candidate-receipt.outcome }}" \
             --oidc-outcome "${{ steps.oidc-receipt.outcome }}" \
-            --final-receipt-outcome "${{ steps.final-receipt.outcome }}" \
+            --finalize-receipt-outcome "${{ steps.finalize-receipt.outcome }}" \
             --terminal-artifact-outcome "${{ steps.terminal-success-artifact.outcome }}"
-      - name: Upload receipt-stage failure evidence
-        id: receipt-stage-failure-artifact
+      - name: Upload receipt-stage failure evidence primary
+        id: receipt-stage-failure-artifact-primary
         if: always() && steps.receipt-stage-failure.outcome == 'success'
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hf-space-receipt-stage-failure
+          name: hf-space-receipt-stage-failure-primary
+          path: ${{ runner.temp }}/hf-receipt-stage-failure.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retry receipt-stage failure evidence upload
+        id: receipt-stage-failure-artifact-retry
+        if: >-
+          always() && steps.receipt-stage-failure.outcome == 'success' &&
+          steps.receipt-stage-failure-artifact-primary.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hf-space-receipt-stage-failure-retry
           path: ${{ runner.temp }}/hf-receipt-stage-failure.json
           if-no-files-found: error
           retention-days: 90
@@ -213,8 +246,14 @@ jobs:
         if: always()
         shell: bash
         run: |
-          test "${{ steps.publish-measure.outcome }}" = "success"
-          test "${{ steps.success-artifact.outcome }}" = "success"
-          test "${{ steps.oidc-receipt.outcome }}" = "success"
-          test "${{ steps.final-receipt.outcome }}" = "success"
-          test "${{ steps.terminal-success-artifact.outcome }}" = "success"
+          set -euo pipefail
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py enforce-terminal \
+            --publish-outcome "${{ steps.publish-measure.outcome }}" \
+            --artifact-outcome "${{ steps.success-artifact.outcome }}" \
+            --candidate-receipt-outcome "${{ steps.candidate-receipt.outcome }}" \
+            --oidc-outcome "${{ steps.oidc-receipt.outcome }}" \
+            --finalize-receipt-outcome "${{ steps.finalize-receipt.outcome }}" \
+            --terminal-artifact-outcome "${{ steps.terminal-success-artifact.outcome }}" \
+            --failure-synthesis-outcome "${{ steps.receipt-stage-failure.outcome }}" \
+            --failure-artifact-primary-outcome "${{ steps.receipt-stage-failure-artifact-primary.outcome }}" \
+            --failure-artifact-retry-outcome "${{ steps.receipt-stage-failure-artifact-retry.outcome }}"

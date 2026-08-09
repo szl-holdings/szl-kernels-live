@@ -34,10 +34,13 @@ from scripts.deploy_hf_space import (
     attest_publication,
     canonical_json,
     deploy_bundle,
+    enforce_terminal_evidence,
     evaluate_effective_rulesets,
+    finalize_attested_receipt,
     normalize_public_static_index,
     require_governed_main,
-    synthesize_oidc_receipt,
+    require_receipt_failure_artifact,
+    synthesize_candidate_receipt,
     validate_bundle,
     validate_public_provenance,
     write_failure_evidence,
@@ -328,16 +331,22 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         success_evidence = workflow.index(
             "Upload locally measured deployment evidence"
         )
-        final_attestation = workflow.index("Attest final exact-revision receipt")
-        final_subject = workflow.index(
-            "subject-path: ${{ runner.temp }}/hf-live-attestation.json"
+        candidate_receipt = workflow.index(
+            "Synthesize deterministic canonical success receipt candidate"
         )
-        final_receipt = workflow.index("Synthesize canonical OIDC success receipt")
+        final_attestation = workflow.index("Attest canonical final success receipt bytes")
+        final_subject = workflow.index(
+            "subject-path: ${{ runner.temp }}/hf-terminal-candidate/hf-canonical-success-receipt.json"
+        )
+        final_receipt = workflow.index(
+            "Promote attested receipt and bind separate metadata envelope"
+        )
         terminal_success = workflow.index("Upload required terminal success evidence")
         stage_failure = workflow.index("Synthesize receipt-stage failure evidence")
         terminal_gate = workflow.index("Enforce terminal publication evidence")
         self.assertLess(publish, success_evidence)
-        self.assertLess(success_evidence, final_attestation)
+        self.assertLess(success_evidence, candidate_receipt)
+        self.assertLess(candidate_receipt, final_attestation)
         self.assertLess(final_attestation, final_subject)
         self.assertLess(final_subject, final_receipt)
         self.assertLess(final_receipt, terminal_success)
@@ -346,23 +355,42 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertEqual(workflow.count("actions/attest-build-provenance@"), 2)
         self.assertIn("id: publish-measure", workflow)
         self.assertIn("id: success-artifact", workflow)
+        self.assertIn("id: candidate-receipt", workflow)
         self.assertIn("id: oidc-receipt", workflow)
-        self.assertIn("id: final-receipt", workflow)
+        self.assertIn("id: finalize-receipt", workflow)
         self.assertIn("id: terminal-success-artifact", workflow)
         for output_name in ("attestation-id", "attestation-url", "bundle-path"):
             self.assertIn(
                 "steps.oidc-receipt.outputs." + output_name,
                 workflow,
             )
-        self.assertIn("hf-oidc-receipt.json", workflow)
+        self.assertIn("hf-canonical-success-receipt.json", workflow)
+        self.assertIn("hf-oidc-attestation-envelope.json", workflow)
         self.assertIn("hf-space-terminal-success-evidence", workflow)
         self.assertIn("continue-on-error: true", workflow)
         self.assertIn("stage-failure", workflow)
         self.assertIn("hf-space-receipt-stage-failure", workflow)
-        self.assertIn('test "${{ steps.oidc-receipt.outcome }}" = "success"', workflow)
-        self.assertIn('test "${{ steps.final-receipt.outcome }}" = "success"', workflow)
+        self.assertIn("scripts/deploy_hf_space.py enforce-terminal", workflow)
+        for outcome_binding in (
+            '--oidc-outcome "${{ steps.oidc-receipt.outcome }}"',
+            '--finalize-receipt-outcome "${{ steps.finalize-receipt.outcome }}"',
+            '--terminal-artifact-outcome "${{ steps.terminal-success-artifact.outcome }}"',
+            '--failure-synthesis-outcome "${{ steps.receipt-stage-failure.outcome }}"',
+            '--failure-artifact-primary-outcome "${{ steps.receipt-stage-failure-artifact-primary.outcome }}"',
+            '--failure-artifact-retry-outcome "${{ steps.receipt-stage-failure-artifact-retry.outcome }}"',
+        ):
+            self.assertIn(outcome_binding, workflow)
+        self.assertIn("enforce-terminal", workflow)
+        self.assertIn("receipt-stage-failure-artifact-primary", workflow)
+        self.assertIn("receipt-stage-failure-artifact-retry", workflow)
         self.assertIn(
-            'test "${{ steps.terminal-success-artifact.outcome }}" = "success"',
+            "steps.receipt-stage-failure-artifact-primary.outcome != 'success'",
+            workflow,
+        )
+        self.assertIn("--failure-artifact-primary-outcome", workflow)
+        self.assertIn("--failure-artifact-retry-outcome", workflow)
+        self.assertIn(
+            'rm -f \\\n            "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json"',
             workflow,
         )
         self.assertIn("if-no-files-found: error", workflow)
@@ -1232,12 +1260,16 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     bundle, manifest, PARENT_SHA, deadline=float("inf")
                 )
 
-    def test_post_oidc_receipt_is_canonical_and_requires_false_local_flags(self) -> None:
+    def test_attested_candidate_is_promoted_without_mutation_and_metadata_is_separate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             result = root / "result.json"
             measurement = root / "measurement.json"
-            output = root / "hf-oidc-receipt.json"
+            candidate = root / "candidate" / "hf-canonical-success-receipt.json"
+            output = root / "hf-canonical-success-receipt.json"
+            envelope_path = root / "hf-oidc-attestation-envelope.json"
+            bundle = root / "attestation.jsonl"
+            bundle.write_bytes(b"signed-attestation-bundle\n")
             result.write_bytes(canonical_json({
                 "source_revision": SOURCE_SHA,
                 "target": HF_REPO,
@@ -1250,41 +1282,90 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "source_revision": SOURCE_SHA,
                 "hf_revision": TARGET_SHA,
                 "target": HF_REPO,
+                "runtime_stage": "RUNNING",
+                "bundle_sha256": "d" * 64,
+                "file_count": 10,
+                "tree_sha256": "e" * 64,
+                "public_index": {"verified": True},
+                "public_provenance": {"verified": True},
+                "post_publication_main": {"status": "AUTHORIZED"},
                 "receipt_minted": False,
                 "deployment_success": False,
             }
             measurement.write_bytes(canonical_json(measured))
-            receipt = synthesize_oidc_receipt(
+            receipt = synthesize_candidate_receipt(
+                candidate,
+                SOURCE_SHA,
+                result,
+                measurement,
+            )
+            attested_bytes = candidate.read_bytes()
+            self.assertTrue(receipt["receipt_minted"])
+            self.assertTrue(receipt["deployment_success"])
+            self.assertEqual(receipt["source"], measured["source"])
+            self.assertEqual(receipt["hf_revision"], TARGET_SHA)
+            self.assertEqual(receipt["runtime_stage"], "RUNNING")
+            self.assertNotIn("attestation", receipt)
+
+            envelope = finalize_attested_receipt(
+                candidate,
                 output,
+                envelope_path,
                 SOURCE_SHA,
                 result,
                 measurement,
                 attestation_id="attestation-id",
                 attestation_url="https://github.com/attestations/attestation-id",
-                bundle_path="/runner/attestation.jsonl",
+                bundle_path=str(bundle),
             )
-            self.assertTrue(receipt["receipt_minted"])
-            self.assertTrue(receipt["deployment_success"])
-            self.assertEqual(receipt["source"], measured["source"])
-            self.assertEqual(receipt["hf_revision"], TARGET_SHA)
-            self.assertEqual(output.read_bytes(), canonical_json(receipt))
+            self.assertFalse(candidate.exists())
+            self.assertEqual(output.read_bytes(), attested_bytes)
+            self.assertEqual(
+                envelope["canonical_receipt"]["sha256"],
+                hashlib.sha256(attested_bytes).hexdigest(),
+            )
+            self.assertEqual(
+                envelope["attestation"]["bundle"]["sha256"],
+                hashlib.sha256(bundle.read_bytes()).hexdigest(),
+            )
+            self.assertNotIn("attestation", json.loads(output.read_text(encoding="utf-8")))
+            self.assertEqual(envelope_path.read_bytes(), canonical_json(envelope))
 
             for field in ("receipt_minted", "deployment_success"):
                 invalid = dict(measured)
                 invalid[field] = True
                 measurement.write_bytes(canonical_json(invalid))
                 rejected = root / f"rejected-{field}.json"
-                with self.assertRaisesRegex(RuntimeError, "not exactly source-bound"):
-                    synthesize_oidc_receipt(
+                with self.assertRaisesRegex(RuntimeError, "not exactly source-bound and complete"):
+                    synthesize_candidate_receipt(
                         rejected,
                         SOURCE_SHA,
                         result,
                         measurement,
-                        attestation_id="attestation-id",
-                        attestation_url="https://github.com/attestations/attestation-id",
-                        bundle_path="/runner/attestation.jsonl",
                     )
                 self.assertFalse(rejected.exists())
+
+    def test_receipt_failure_upload_retry_is_enforced_and_oidc_failure_is_terminal(self) -> None:
+        require_receipt_failure_artifact(True, "failure", "success")
+        with self.assertRaisesRegex(RuntimeError, "was not preserved"):
+            require_receipt_failure_artifact(True, "failure", "failure")
+
+        outcomes = {
+            "publish_outcome": "success",
+            "artifact_outcome": "success",
+            "candidate_receipt_outcome": "success",
+            "oidc_outcome": "failure",
+            "finalize_receipt_outcome": "skipped",
+            "terminal_artifact_outcome": "skipped",
+            "failure_synthesis_outcome": "success",
+            "failure_artifact_primary_outcome": "failure",
+            "failure_artifact_retry_outcome": "success",
+        }
+        with self.assertRaisesRegex(RuntimeError, "terminal publication evidence is incomplete"):
+            enforce_terminal_evidence(**outcomes)
+        outcomes["failure_artifact_retry_outcome"] = "failure"
+        with self.assertRaisesRegex(RuntimeError, "was not preserved"):
+            enforce_terminal_evidence(**outcomes)
 
     def test_workflow_stage_failure_is_machine_readable_and_never_success(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1323,6 +1404,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 receipt,
                 failure_stage="OIDC_RECEIPT_ATTESTATION",
                 artifact_outcome="success",
+                candidate_receipt_outcome="success",
                 oidc_outcome="failure",
             )
             self.assertEqual(
@@ -1331,6 +1413,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             self.assertEqual(evidence["hf_revision"], TARGET_SHA)
             self.assertFalse(evidence["receipt_minted"])
             self.assertFalse(evidence["deployment_success"])
+            self.assertEqual(evidence["candidate_receipt_outcome"], "success")
             self.assertEqual(
                 output.read_bytes(), canonical_json(evidence)
             )

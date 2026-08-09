@@ -1358,15 +1358,17 @@ def write_workflow_stage_failure(
     *,
     failure_stage: str,
     artifact_outcome: str,
+    candidate_receipt_outcome: str,
     oidc_outcome: str,
-    final_receipt_outcome: str = "skipped",
+    finalize_receipt_outcome: str = "skipped",
     terminal_artifact_outcome: str = "skipped",
 ) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
     if failure_stage not in {
         "SUCCESS_ARTIFACT_UPLOAD",
+        "CANDIDATE_RECEIPT_SYNTHESIS",
         "OIDC_RECEIPT_ATTESTATION",
-        "FINAL_RECEIPT_SYNTHESIS",
+        "FINAL_RECEIPT_PROMOTION",
         "TERMINAL_SUCCESS_ARTIFACT",
     }:
         raise RuntimeError("workflow receipt failure stage is not supported")
@@ -1392,7 +1394,7 @@ def write_workflow_stage_failure(
     if result.get("source_revision") != source_sha or result.get("target") != HF_REPO:
         raise RuntimeError("deployment result is not exactly source-bound")
     evidence = {
-        "schema": "szl.hf-receipt-stage-failure/v1",
+        "schema": "szl.hf-receipt-stage-failure/v2",
         "status": "FAILED_AFTER_LOCAL_MEASUREMENT",
         "failure_stage": failure_stage,
         "deployment_success": False,
@@ -1403,8 +1405,9 @@ def write_workflow_stage_failure(
         "hf_revision": hf_revision,
         "target": HF_REPO,
         "artifact_upload_outcome": artifact_outcome,
+        "candidate_receipt_outcome": candidate_receipt_outcome,
         "oidc_attestation_outcome": oidc_outcome,
-        "final_receipt_outcome": final_receipt_outcome,
+        "finalize_receipt_outcome": finalize_receipt_outcome,
         "terminal_artifact_outcome": terminal_artifact_outcome,
         "local_measurement_contract_valid": measurement_valid,
         "local_measured_receipt_sha256": hashlib.sha256(
@@ -1415,15 +1418,10 @@ def write_workflow_stage_failure(
     return evidence
 
 
-def synthesize_oidc_receipt(
-    output_path: Path,
+def _canonical_success_receipt(
     source_sha: str,
     result_path: Path,
     measurement_path: Path,
-    *,
-    attestation_id: str,
-    attestation_url: str,
-    bundle_path: str,
 ) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
     result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -1438,6 +1436,7 @@ def synthesize_oidc_receipt(
     if (
         result.get("source_revision") != source_sha
         or result.get("target") != HF_REPO
+        or measurement_bytes != canonical_json(measurement)
         or measurement.get("schema") != "szl.hf-live-attestation/v2"
         or measurement.get("status") != "MEASURED"
         or measurement.get("source") != expected_source
@@ -1446,36 +1445,160 @@ def synthesize_oidc_receipt(
         or measurement.get("target") != HF_REPO
         or measurement.get("receipt_minted") is not False
         or measurement.get("deployment_success") is not False
+        or measurement.get("runtime_stage") != "RUNNING"
+        or not isinstance(measurement.get("file_count"), int)
+        or isinstance(measurement.get("file_count"), bool)
+        or measurement.get("file_count", 0) <= 0
+        or not isinstance(measurement.get("public_index"), dict)
+        or not isinstance(measurement.get("post_publication_main"), dict)
+        or not isinstance(measurement.get("public_provenance"), dict)
+        or measurement["public_provenance"].get("verified") is not True
+        or not re.fullmatch(r"[0-9a-f]{64}", str(measurement.get("bundle_sha256", "")))
+        or not re.fullmatch(r"[0-9a-f]{64}", str(measurement.get("tree_sha256", "")))
     ):
-        raise RuntimeError("local measured evidence is not exactly source-bound")
+        raise RuntimeError("local measured evidence is not exactly source-bound and complete")
+    receipt = dict(measurement)
+    receipt.update(
+        {
+            "schema": "szl.hf-oidc-receipt/v2",
+            "status": "OIDC_ATTESTED_DEPLOYMENT",
+            "measurement": {
+                "path": measurement_path.name,
+                "schema": measurement["schema"],
+                "sha256": sha256_bytes(measurement_bytes),
+            },
+            "receipt_minted": True,
+            "deployment_success": True,
+        }
+    )
+    return receipt
+
+
+def synthesize_candidate_receipt(
+    output_path: Path,
+    source_sha: str,
+    result_path: Path,
+    measurement_path: Path,
+) -> dict[str, object]:
+    receipt = _canonical_success_receipt(source_sha, result_path, measurement_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("xb") as handle:
+        handle.write(canonical_json(receipt))
+    return receipt
+
+
+def finalize_attested_receipt(
+    candidate_path: Path,
+    output_path: Path,
+    envelope_path: Path,
+    source_sha: str,
+    result_path: Path,
+    measurement_path: Path,
+    *,
+    attestation_id: str,
+    attestation_url: str,
+    bundle_path: str,
+) -> dict[str, object]:
+    expected_receipt = _canonical_success_receipt(
+        source_sha, result_path, measurement_path
+    )
+    candidate_bytes = candidate_path.read_bytes()
+    if candidate_bytes != canonical_json(expected_receipt):
+        raise RuntimeError("attested candidate receipt bytes are not canonical and exact")
     outputs = (attestation_id, attestation_url, bundle_path)
     if any(not isinstance(value, str) or not value or len(value) > 4096 for value in outputs):
         raise RuntimeError("OIDC attestation outputs are incomplete")
     parsed_url = urllib.parse.urlsplit(attestation_url)
     if parsed_url.scheme != "https" or not parsed_url.netloc:
         raise RuntimeError("OIDC attestation URL is not HTTPS")
-    receipt = {
-        "schema": "szl.hf-oidc-receipt/v1",
-        "status": "OIDC_ATTESTED_DEPLOYMENT",
-        "source": expected_source,
-        "source_revision": source_sha,
-        "hf_revision": hf_revision,
+    bundle = Path(bundle_path)
+    bundle_bytes = bundle.read_bytes()
+    if not bundle_bytes:
+        raise RuntimeError("OIDC attestation bundle is empty")
+    if output_path.exists() or envelope_path.exists():
+        raise RuntimeError("terminal receipt or attestation envelope already exists")
+    envelope = {
+        "schema": "szl.hf-oidc-attestation-envelope/v1",
+        "status": "ATTESTATION_METADATA_BOUND",
+        "source": expected_receipt["source"],
+        "source_revision": expected_receipt["source_revision"],
+        "hf_revision": expected_receipt["hf_revision"],
         "target": HF_REPO,
-        "measurement": {
-            "path": measurement_path.name,
-            "sha256": sha256_bytes(measurement_bytes),
+        "canonical_receipt": {
+            "name": output_path.name,
+            "sha256": sha256_bytes(candidate_bytes),
         },
         "attestation": {
             "id": attestation_id,
             "url": attestation_url,
-            "bundle_path": bundle_path,
+            "bundle": {
+                "name": bundle.name,
+                "sha256": sha256_bytes(bundle_bytes),
+            },
         },
-        "receipt_minted": True,
-        "deployment_success": True,
     }
-    with output_path.open("xb") as handle:
-        handle.write(canonical_json(receipt))
-    return receipt
+    with envelope_path.open("xb") as handle:
+        handle.write(canonical_json(envelope))
+    candidate_path.replace(output_path)
+    if sha256_file(output_path) != envelope["canonical_receipt"]["sha256"]:
+        raise RuntimeError("promoted receipt bytes changed after OIDC attestation")
+    return envelope
+
+
+STEP_OUTCOMES = {"success", "failure", "skipped", "cancelled"}
+
+
+def require_receipt_failure_artifact(
+    required: bool,
+    primary_outcome: str,
+    retry_outcome: str,
+) -> None:
+    if not required:
+        return
+    if primary_outcome not in STEP_OUTCOMES or retry_outcome not in STEP_OUTCOMES:
+        raise RuntimeError("receipt-stage artifact outcome is malformed")
+    if primary_outcome != "success" and retry_outcome != "success":
+        raise RuntimeError("receipt-stage failure evidence was not preserved")
+
+
+def enforce_terminal_evidence(
+    *,
+    publish_outcome: str,
+    artifact_outcome: str,
+    candidate_receipt_outcome: str,
+    oidc_outcome: str,
+    finalize_receipt_outcome: str,
+    terminal_artifact_outcome: str,
+    failure_synthesis_outcome: str,
+    failure_artifact_primary_outcome: str,
+    failure_artifact_retry_outcome: str,
+) -> dict[str, object]:
+    success_path = {
+        "publish": publish_outcome,
+        "local_artifact": artifact_outcome,
+        "candidate_receipt": candidate_receipt_outcome,
+        "oidc_attestation": oidc_outcome,
+        "receipt_promotion": finalize_receipt_outcome,
+        "terminal_artifact": terminal_artifact_outcome,
+    }
+    if any(outcome not in STEP_OUTCOMES for outcome in success_path.values()):
+        raise RuntimeError("terminal publication outcome is malformed")
+    receipt_failure_required = publish_outcome == "success" and any(
+        outcome != "success"
+        for name, outcome in success_path.items()
+        if name != "publish"
+    )
+    if receipt_failure_required and failure_synthesis_outcome != "success":
+        raise RuntimeError("receipt-stage failure evidence synthesis did not succeed")
+    require_receipt_failure_artifact(
+        receipt_failure_required,
+        failure_artifact_primary_outcome,
+        failure_artifact_retry_outcome,
+    )
+    failed = [name for name, outcome in success_path.items() if outcome != "success"]
+    if failed:
+        raise RuntimeError(f"terminal publication evidence is incomplete: {failed}")
+    return {"status": "TERMINAL_PUBLICATION_EVIDENCE_COMPLETE"}
 
 
 def stage_failure_main(argv: list[str]) -> int:
@@ -1486,8 +1609,9 @@ def stage_failure_main(argv: list[str]) -> int:
     parser.add_argument("--failure-evidence", type=Path, required=True)
     parser.add_argument("--failure-stage", required=True)
     parser.add_argument("--artifact-outcome", required=True)
+    parser.add_argument("--candidate-receipt-outcome", required=True)
     parser.add_argument("--oidc-outcome", required=True)
-    parser.add_argument("--final-receipt-outcome", required=True)
+    parser.add_argument("--finalize-receipt-outcome", required=True)
     parser.add_argument("--terminal-artifact-outcome", required=True)
     args = parser.parse_args(argv)
     evidence = write_workflow_stage_failure(
@@ -1497,26 +1621,48 @@ def stage_failure_main(argv: list[str]) -> int:
         args.receipt,
         failure_stage=args.failure_stage,
         artifact_outcome=args.artifact_outcome,
+        candidate_receipt_outcome=args.candidate_receipt_outcome,
         oidc_outcome=args.oidc_outcome,
-        final_receipt_outcome=args.final_receipt_outcome,
+        finalize_receipt_outcome=args.finalize_receipt_outcome,
         terminal_artifact_outcome=args.terminal_artifact_outcome,
     )
     print(json.dumps(evidence, sort_keys=True))
     return 0
 
 
-def final_receipt_main(argv: list[str]) -> int:
+def candidate_receipt_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--measurement", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    receipt = synthesize_candidate_receipt(
+        args.output,
+        args.source_sha,
+        args.result,
+        args.measurement,
+    )
+    print(json.dumps(receipt, sort_keys=True))
+    return 0
+
+
+def finalize_receipt_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument("--measurement", type=Path, required=True)
+    parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--envelope", type=Path, required=True)
     parser.add_argument("--attestation-id", required=True)
     parser.add_argument("--attestation-url", required=True)
     parser.add_argument("--bundle-path", required=True)
     args = parser.parse_args(argv)
-    receipt = synthesize_oidc_receipt(
+    envelope = finalize_attested_receipt(
+        args.candidate,
         args.output,
+        args.envelope,
         args.source_sha,
         args.result,
         args.measurement,
@@ -1524,7 +1670,24 @@ def final_receipt_main(argv: list[str]) -> int:
         attestation_url=args.attestation_url,
         bundle_path=args.bundle_path,
     )
-    print(json.dumps(receipt, sort_keys=True))
+    print(json.dumps(envelope, sort_keys=True))
+    return 0
+
+
+def enforce_terminal_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--publish-outcome", required=True)
+    parser.add_argument("--artifact-outcome", required=True)
+    parser.add_argument("--candidate-receipt-outcome", required=True)
+    parser.add_argument("--oidc-outcome", required=True)
+    parser.add_argument("--finalize-receipt-outcome", required=True)
+    parser.add_argument("--terminal-artifact-outcome", required=True)
+    parser.add_argument("--failure-synthesis-outcome", required=True)
+    parser.add_argument("--failure-artifact-primary-outcome", required=True)
+    parser.add_argument("--failure-artifact-retry-outcome", required=True)
+    args = parser.parse_args(argv)
+    result = enforce_terminal_evidence(**vars(args))
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 
@@ -1533,8 +1696,12 @@ def main() -> int:
         return upload_child_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "stage-failure":
         return stage_failure_main(sys.argv[2:])
-    if len(sys.argv) > 1 and sys.argv[1] == "final-receipt":
-        return final_receipt_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "candidate-receipt":
+        return candidate_receipt_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "finalize-receipt":
+        return finalize_receipt_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "enforce-terminal":
+        return enforce_terminal_main(sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
