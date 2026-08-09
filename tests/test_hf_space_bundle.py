@@ -27,6 +27,7 @@ from scripts.deploy_hf_space import (
     _fetch_public_index,
     _hf_upload_child_environment,
     _recover_authoritative_revision,
+    _run_bounded_process,
     _run_killable_child,
     _public_bytes,
     _request_json_retry,
@@ -346,7 +347,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         )
         final_attestation = workflow.index("Attest canonical final success receipt bytes")
         final_subject = workflow.index(
-            "subject-path: ${{ runner.temp }}/hf-terminal-candidate/hf-canonical-success-receipt.json"
+            "DEADLINE_ACTION_INPUT_SUBJECT_PATH: ${{ runner.temp }}/hf-terminal-candidate/hf-canonical-success-receipt.json"
         )
         final_receipt = workflow.index(
             "Promote attested receipt and bind separate metadata envelope"
@@ -362,7 +363,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertLess(final_receipt, terminal_success)
         self.assertLess(terminal_success, stage_failure)
         self.assertLess(stage_failure, terminal_gate)
-        self.assertEqual(workflow.count("actions/attest-build-provenance@"), 2)
+        self.assertEqual(workflow.count("actions/attest-build-provenance@"), 1)
         self.assertIn("id: publish-measure", workflow)
         self.assertIn("id: success-artifact", workflow)
         self.assertIn("id: candidate-receipt", workflow)
@@ -409,7 +410,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             "$RUNNER_TEMP/hf-oidc-attestation-envelope.json",
         ):
             self.assertIn(f'--cleanup-path "{cleanup_path}"', workflow)
-        self.assertIn("if-no-files-found: error", workflow)
+        self.assertIn("DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error", workflow)
         self.assertIn("deployment-failure-artifact-primary", workflow)
         self.assertIn("deployment-failure-artifact-retry", workflow)
         self.assertIn("id: deployment-failure-receipt", workflow)
@@ -417,7 +418,10 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertIn("hf-space-deployment-failure-receipt-primary", workflow)
         self.assertIn("hf-space-deployment-failure-receipt-retry", workflow)
         self.assertIn("hf-space-deployment-failure-supporting", workflow)
-        self.assertIn("path: ${{ runner.temp }}/hf-deploy-failure.json", workflow)
+        self.assertIn(
+            "DEADLINE_ACTION_INPUT_PATH: ${{ runner.temp }}/hf-deploy-failure.json",
+            workflow,
+        )
         self.assertIn("steps.deployment-failure-receipt.outcome == 'success'", workflow)
         self.assertIn("--deployment-failure-receipt-outcome", workflow)
         self.assertIn("--deployment-failure-artifact-primary-outcome", workflow)
@@ -1755,6 +1759,59 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "validation did not succeed"):
                 enforce_terminal_evidence(**outcomes)
 
+    def test_failure_receipt_rejects_all_status_marker_contradictions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            failure = root / "failure.json"
+
+            write_failure_evidence(
+                failure,
+                SOURCE_SHA,
+                RuntimeError("post-mutation failure"),
+                root / "missing-result.json",
+                {
+                    "upload_call_entered": True,
+                    "authoritative_readback_attempted": False,
+                    "known_hf_revision": TARGET_SHA,
+                },
+            )
+            partial = validate_deployment_failure_receipt(failure, SOURCE_SHA)
+            self.assertEqual(partial["status"], "PARTIAL_AFTER_MUTATION")
+            partial["upload_call_entered"] = False
+            failure.write_bytes(canonical_json(partial))
+            with self.assertRaisesRegex(RuntimeError, "lacks its mutation marker"):
+                validate_deployment_failure_receipt(failure, SOURCE_SHA)
+
+            write_failure_evidence(
+                failure,
+                SOURCE_SHA,
+                TimeoutError("mutation result unknown"),
+                root / "missing-result.json",
+                {
+                    "upload_call_entered": True,
+                    "authoritative_readback_attempted": True,
+                    "known_hf_revision": None,
+                },
+            )
+            unknown = validate_deployment_failure_receipt(failure, SOURCE_SHA)
+            self.assertEqual(unknown["status"], "MUTATION_OUTCOME_UNKNOWN")
+            unknown["authoritative_readback_attempted"] = False
+            failure.write_bytes(canonical_json(unknown))
+            with self.assertRaisesRegex(RuntimeError, "lacks authoritative readback"):
+                validate_deployment_failure_receipt(failure, SOURCE_SHA)
+
+    def test_bounded_external_action_is_killed_and_reaped_at_deadline(self) -> None:
+        command = [sys.executable, "-I", "-P", "-c", "import time; time.sleep(60)"]
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "absolute deadline"):
+            _run_bounded_process(
+                command,
+                deadline=time.monotonic() + 0.25,
+                max_seconds=30,
+                environment=dict(os.environ),
+            )
+        self.assertLess(time.monotonic() - started, 2.0)
+
     def test_terminal_cleanup_is_behavioral_and_nonrecursive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1913,6 +1970,23 @@ class TerminalEvidenceEnvelopeContractTests(unittest.TestCase):
         self.assertIn("operation_remaining", workflow)
         self.assertIn("operation_remaining < 1800", workflow)
         self.assertIn("10m terminal-evidence, and 5m runner slack", workflow)
+        mutation = workflow.index("Publish and measure exact protected-main bundle")
+        terminal = workflow[mutation:]
+        self.assertNotIn("uses: actions/attest-build-provenance@", terminal)
+        self.assertNotIn("uses: actions/upload-artifact@", terminal)
+        self.assertIn("bounded-action", terminal)
+        self.assertIn("--action attest --reserve-seconds 300", terminal)
+        self.assertIn("--action upload --reserve-seconds 300", terminal)
+        self.assertIn("--action upload --reserve-seconds 60", terminal)
+        self.assertIn("Fetch pinned bounded attestation action before mutation", workflow)
+        self.assertIn("Fetch pinned bounded artifact action before mutation", workflow)
+        self.assertIn("59d89421af93a897026c735860bf21b6eb4f7b26", workflow)
+        self.assertIn("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", workflow)
+        self.assertIn(
+            "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            workflow,
+        )
+        self.assertIn('node-version: "24.19.0"', workflow)
 
     def test_exact_failure_receipt_is_required_before_both_upload_attempts(self) -> None:
         root = Path(__file__).resolve().parents[1]

@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -52,6 +54,18 @@ PUBLIC_INDEX_FIELDS = frozenset(
 GOVERNED_MAIN_STATUS = "AUTHORIZED_EXACT_PROTECTED_MAIN"
 TERMINAL_EVIDENCE_RESERVE_SECONDS = 600
 TERMINAL_DEADLINE_ENV = "HF_TERMINAL_DEADLINE_EPOCH"
+DEADLINE_ACTION_INPUT_PREFIX = "DEADLINE_ACTION_INPUT_"
+BOUNDED_NODE_VERSION = "24.19.0"
+BOUNDED_ACTIONS = {
+    "attest": {
+        "entry": ".terminal-actions/attest/dist/index.js",
+        "sha256": "b8b1ab02d45833f537b3622cccfdfbc27c5523f232de324a51c22e465e8c6353",
+    },
+    "upload": {
+        "entry": ".terminal-actions/upload-artifact/dist/upload/index.js",
+        "sha256": "eea594941d8ee535974e0fbc03bbdf567f3abc78194f224b93f2df9a887ee2e9",
+    },
+}
 
 
 class TransientReadError(RuntimeError):
@@ -216,6 +230,120 @@ def _require_workflow_terminal_budget() -> None:
             terminal_deadline,
             max(0.001, terminal_deadline - time.monotonic()),
         )
+
+
+def _kill_bounded_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=5)
+
+
+def _run_bounded_process(
+    command: list[str],
+    *,
+    deadline: float,
+    max_seconds: float,
+    environment: dict[str, str] | None = None,
+) -> None:
+    timeout = _remaining_timeout(deadline, max_seconds)
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        env=environment,
+        start_new_session=os.name != "nt",
+    )
+    try:
+        process.wait(timeout=_remaining_timeout(deadline, timeout))
+    except subprocess.TimeoutExpired:
+        _kill_bounded_process(process)
+        raise TimeoutError("bounded external action exceeded its absolute deadline") from None
+    except BaseException:
+        _kill_bounded_process(process)
+        raise
+    if time.monotonic() >= deadline:
+        raise RetryExhausted("bounded external action returned after its absolute deadline")
+    if process.returncode != 0:
+        raise RuntimeError("bounded external action failed")
+
+
+def run_bounded_action(
+    action: str,
+    *,
+    reserve_seconds: int,
+    max_seconds: int,
+) -> None:
+    if action not in BOUNDED_ACTIONS:
+        raise RuntimeError("bounded external action is not allowlisted")
+    if reserve_seconds < 60 or reserve_seconds > TERMINAL_EVIDENCE_RESERVE_SECONDS:
+        raise RuntimeError("bounded external action reserve is invalid")
+    if max_seconds < 1 or max_seconds > 300:
+        raise RuntimeError("bounded external action cap is invalid")
+    raw_deadline = os.environ.get(TERMINAL_DEADLINE_ENV, "")
+    if not raw_deadline.isdigit():
+        raise RuntimeError(f"{TERMINAL_DEADLINE_ENV} is required and must be numeric")
+    remaining = int(raw_deadline) - reserve_seconds - time.time()
+    if remaining <= 0:
+        raise RetryExhausted("bounded external action reserve is exhausted")
+    deadline = time.monotonic() + remaining
+
+    workspace_raw = os.environ.get("GITHUB_WORKSPACE", "")
+    if not workspace_raw:
+        raise RuntimeError("GITHUB_WORKSPACE is required for bounded external actions")
+    workspace = Path(workspace_raw).resolve()
+    descriptor = BOUNDED_ACTIONS[action]
+    entry = (workspace / str(descriptor["entry"])).resolve()
+    expected_entry = (workspace / str(descriptor["entry"])).resolve()
+    if entry != expected_entry or not entry.is_file() or entry.is_symlink():
+        raise RuntimeError("bounded external action entry is missing or unsafe")
+    if sha256_file(entry) != descriptor["sha256"]:
+        raise RuntimeError("bounded external action entry digest differs")
+    node = shutil.which("node")
+    if not node:
+        raise RuntimeError("pinned runner Node runtime is unavailable")
+    node_version = subprocess.run(
+        [node, "-p", "process.versions.node"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=_remaining_timeout(deadline, 5),
+    ).stdout.strip()
+    if node_version != BOUNDED_NODE_VERSION:
+        raise RuntimeError("bounded external action Node runtime is not exact")
+
+    child_environment = dict(os.environ)
+    inputs: dict[str, str] = {}
+    for name in list(child_environment):
+        if name.startswith(DEADLINE_ACTION_INPUT_PREFIX):
+            suffix = name[len(DEADLINE_ACTION_INPUT_PREFIX) :]
+            if not suffix or not re.fullmatch(r"[A-Z][A-Z0-9_]*", suffix):
+                raise RuntimeError("bounded external action input name is malformed")
+            inputs[suffix.lower().replace("_", "-")] = child_environment.pop(name)
+    action_credential = child_environment.pop(
+        "DEADLINE_ACTION_GITHUB_CREDENTIAL",
+        None,
+    )
+    if action_credential is not None:
+        inputs["github-token"] = action_credential
+    if not inputs:
+        raise RuntimeError("bounded external action has no declared inputs")
+    for name, value in inputs.items():
+        child_environment[f"INPUT_{name.upper()}"] = value
+    for secret_name in ("HF_TOKEN", "GOVERNANCE_TOKEN", "GH_TOKEN"):
+        child_environment.pop(secret_name, None)
+
+    _run_bounded_process(
+        [node, str(entry)],
+        deadline=deadline,
+        max_seconds=float(max_seconds),
+        environment=child_environment,
+    )
 
 
 def _request_json(url: str, token: str = "", timeout: float = 30) -> object:
@@ -1530,12 +1658,22 @@ def validate_deployment_failure_receipt(
         raise RuntimeError("required failed-deployment receipt revision is invalid")
     if value["status"] == "PARTIAL_AFTER_MUTATION" and revision is None:
         raise RuntimeError("partial failed-deployment receipt lacks its revision")
+    if (
+        value["status"] == "PARTIAL_AFTER_MUTATION"
+        and not value["upload_call_entered"]
+    ):
+        raise RuntimeError("partial failed-deployment receipt lacks its mutation marker")
     if value["status"] != "PARTIAL_AFTER_MUTATION" and revision is not None:
         raise RuntimeError("failed-deployment receipt revision contradicts its status")
     if value["status"] == "FAILED_BEFORE_MUTATION" and value["upload_call_entered"]:
         raise RuntimeError("failed-before-mutation receipt contradicts its mutation marker")
     if value["status"] == "MUTATION_OUTCOME_UNKNOWN" and not value["upload_call_entered"]:
         raise RuntimeError("unknown mutation receipt lacks its mutation marker")
+    if (
+        value["status"] == "MUTATION_OUTCOME_UNKNOWN"
+        and not value["authoritative_readback_attempted"]
+    ):
+        raise RuntimeError("unknown mutation receipt lacks authoritative readback")
     if not isinstance(value.get("error_type"), str) or not value["error_type"]:
         raise RuntimeError("required failed-deployment receipt error type is invalid")
     if not isinstance(value.get("error"), str) or not value["error"] or len(value["error"]) > 1000:
@@ -2140,6 +2278,20 @@ def validate_deployment_failure_main(argv: list[str]) -> int:
     return 0
 
 
+def bounded_action_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--action", choices=sorted(BOUNDED_ACTIONS), required=True)
+    parser.add_argument("--reserve-seconds", type=int, required=True)
+    parser.add_argument("--max-seconds", type=int, required=True)
+    args = parser.parse_args(argv)
+    run_bounded_action(
+        args.action,
+        reserve_seconds=args.reserve_seconds,
+        max_seconds=args.max_seconds,
+    )
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "upload-child":
         return upload_child_main(sys.argv[2:])
@@ -2153,6 +2305,8 @@ def main() -> int:
         return enforce_terminal_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "validate-deployment-failure":
         return validate_deployment_failure_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "bounded-action":
+        return bounded_action_main(sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
