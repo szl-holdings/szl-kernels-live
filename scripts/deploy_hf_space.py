@@ -662,7 +662,11 @@ def deploy_bundle(
             deadline=upload_deadline,
             entered_marker=entered_marker,
             mutation_state=mutation_state,
-            environment=dict(os.environ),
+            environment={
+                key: value
+                for key, value in os.environ.items()
+                if key != "GOVERNANCE_TOKEN"
+            },
         )
         child_value = json.loads(child_result.read_text(encoding="utf-8"))
         target_sha = exact_sha(

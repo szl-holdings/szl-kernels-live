@@ -310,6 +310,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         )
         self.assertNotIn("GITHUB_TOKEN: ${{ github.token }}", workflow)
         self.assertNotIn("GH_TOKEN: ${{ github.token }}", workflow)
+        self.assertIn("timeout-minutes: 30", workflow)
         mint_governance = workflow.index(
             "Mint least-privilege governed ruleset reader"
         )
@@ -1122,8 +1123,13 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             build_bundle(bundle, SOURCE_SHA)
             result = Path(temporary) / "result.json"
             state: dict[str, object] = {}
-            environment = {"HF_TOKEN": "test-hf-token"}
+            child_environment: dict[str, str] = {}
+            environment = {
+                "HF_TOKEN": "test-hf-token",
+                "GOVERNANCE_TOKEN": "test-governance-token",
+            }
             def hanging_child(_command, *, entered_marker, mutation_state, **_kwargs):
+                child_environment.update(_kwargs["environment"])
                 entered_marker.write_text("entered", encoding="utf-8")
                 mutation_state["upload_call_entered"] = True
                 raise TimeoutError("transport reset")
@@ -1146,6 +1152,8 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             self.assertTrue(state["upload_call_entered"])
             self.assertTrue(state["authoritative_readback_attempted"])
             self.assertIsNone(state["known_hf_revision"])
+            self.assertEqual(child_environment["HF_TOKEN"], "test-hf-token")
+            self.assertNotIn("GOVERNANCE_TOKEN", child_environment)
             boundary = json.loads(result.read_text(encoding="utf-8"))
             self.assertEqual(boundary["status"], "MUTATION_BOUNDARY_CROSSED")
             self.assertEqual(boundary["previous_hf_revision"], PARENT_SHA)
