@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 import time
@@ -31,8 +32,13 @@ PENDING_STAGES = {"BUILDING", "APP_STARTING", "STARTING", "RUNNING_BUILDING"}
 TRANSIENT_HTTP_STATUS = frozenset({429, *range(500, 600)})
 ATTEST_TIMEOUT_SECONDS = 600
 MUTATION_READBACK_SECONDS = 30
+MUTATION_TIMEOUT_SECONDS = 300
 RETRY_DELAY_SECONDS = 2
 UA = "szl-kernels-live-deployer/1.0"
+HF_WINDOW_PREFIX = b"<script>window.huggingface="
+HF_WINDOW_TERMINATOR = b";</script>"
+HF_WINDOW_MAX_INJECTION_BYTES = 4096
+HTML_HEAD_BOUNDARY = b"<head>"
 
 
 class TransientReadError(RuntimeError):
@@ -61,6 +67,72 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _parse_hf_window_object(payload: bytes) -> dict[str, object]:
+    if b"<" in payload or b">" in payload or b"\x00" in payload:
+        raise RuntimeError("Hugging Face window payload contains markup")
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("Hugging Face window payload is not UTF-8") from error
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.fullmatch(r"\{variables:(\{.*\})\}", text, re.DOTALL)
+        if not match:
+            raise RuntimeError("Hugging Face window payload is not an object") from None
+        try:
+            variables = json.loads(match.group(1))
+        except json.JSONDecodeError as error:
+            raise RuntimeError("Hugging Face window variables are not JSON") from error
+        if not isinstance(variables, dict):
+            raise RuntimeError("Hugging Face window variables are not an object")
+        value = {"variables": variables}
+    if not isinstance(value, dict):
+        raise RuntimeError("Hugging Face window payload is not an object")
+    return value
+
+
+def normalize_public_static_index(
+    observed_bytes: bytes,
+    immutable_bytes: bytes,
+) -> dict[str, object]:
+    """Close the one deterministic Hugging Face Static HTML transformation."""
+    if immutable_bytes.count(HTML_HEAD_BOUNDARY) != 1:
+        raise RuntimeError("bundled index does not have one exact head boundary")
+    if b"window.huggingface" in immutable_bytes:
+        raise RuntimeError("bundled index already contains platform injection")
+    boundary = immutable_bytes.index(HTML_HEAD_BOUNDARY) + len(HTML_HEAD_BOUNDARY)
+    if observed_bytes[:boundary] != immutable_bytes[:boundary]:
+        raise RuntimeError("public platform injection is at the wrong head boundary")
+    if not observed_bytes.startswith(HF_WINDOW_PREFIX, boundary):
+        raise RuntimeError("public index omitted the exact window.huggingface injection")
+    payload_start = boundary + len(HF_WINDOW_PREFIX)
+    terminator = observed_bytes.find(HF_WINDOW_TERMINATOR, payload_start)
+    if terminator < 0:
+        raise RuntimeError("public platform injection has no strict script terminator")
+    injection_end = terminator + len(HF_WINDOW_TERMINATOR)
+    injection = observed_bytes[boundary:injection_end]
+    if len(injection) > HF_WINDOW_MAX_INJECTION_BYTES:
+        raise RuntimeError("public platform injection exceeds the size limit")
+    if observed_bytes.count(b"window.huggingface") != 1:
+        raise RuntimeError("public index contains multiple platform injections")
+    _parse_hf_window_object(observed_bytes[payload_start:terminator])
+    normalized = observed_bytes[:boundary] + observed_bytes[injection_end:]
+    if normalized != immutable_bytes:
+        raise RuntimeError("public index has bytes outside the one platform injection")
+    return {
+        "transformation": "HF_WINDOW_HUGGINGFACE_HEAD_INJECTION_V1",
+        "normalized_bytes": len(normalized),
+        "normalized_sha256": sha256_bytes(normalized),
+        "injection_bytes": len(injection),
+        "injection_sha256": sha256_bytes(injection),
+    }
 
 
 def exact_sha(value: object, label: str) -> str:
@@ -384,20 +456,110 @@ def _recover_authoritative_revision(
     previous_sha: str,
     *,
     deadline: float,
-) -> str | None:
+) -> str:
     """Return a post-exception revision only after authoritative exact-byte closure."""
-    info = _request_json_retry(
-        f"https://huggingface.co/api/spaces/{HF_REPO}",
-        deadline=deadline,
-        label="ambiguous-mutation authoritative revision readback",
+    previous_sha = exact_sha(previous_sha, "observed Hugging Face parent revision")
+    while True:
+        if time.monotonic() >= deadline:
+            raise RetryExhausted(
+                "ambiguous mutation remained at the exact recorded parent"
+            )
+        info = _request_json_retry(
+            f"https://huggingface.co/api/spaces/{HF_REPO}",
+            deadline=deadline,
+            label="ambiguous-mutation authoritative revision readback",
+        )
+        if not isinstance(info, dict):
+            raise RuntimeError("authoritative Hugging Face response is malformed")
+        candidate = exact_sha(info.get("sha"), "authoritative Hugging Face revision")
+        if candidate == previous_sha:
+            time.sleep(min(RETRY_DELAY_SECONDS, max(0.0, deadline - time.monotonic())))
+            continue
+        try:
+            _verify_exact_hf_revision(
+                bundle,
+                manifest,
+                candidate,
+                deadline=deadline,
+                retry_byte_mismatch=False,
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"ambiguous mutation conflict at unrelated revision {candidate}"
+            ) from error
+        return candidate
+
+
+def _run_killable_child(
+    command: list[str],
+    *,
+    deadline: float,
+    entered_marker: Path,
+    mutation_state: dict[str, object],
+    environment: dict[str, str] | None = None,
+) -> None:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=environment,
+        start_new_session=os.name != "nt",
     )
-    if not isinstance(info, dict):
-        return None
-    candidate = exact_sha(info.get("sha"), "authoritative Hugging Face revision")
-    if candidate == previous_sha:
-        return None
-    _verify_exact_hf_revision(bundle, manifest, candidate, deadline=deadline)
-    return candidate
+    try:
+        process.wait(timeout=_remaining_timeout(deadline, max(0.001, deadline - time.monotonic())))
+    except subprocess.TimeoutExpired:
+        mutation_state["upload_call_entered"] = entered_marker.is_file()
+        process.kill()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        raise TimeoutError("Hugging Face upload child exceeded its wall-clock deadline") from None
+    finally:
+        if entered_marker.is_file():
+            mutation_state["upload_call_entered"] = True
+    if process.returncode != 0:
+        raise RuntimeError("Hugging Face upload child failed")
+
+
+def upload_child_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--parent-sha", required=True)
+    parser.add_argument("--entered-marker", type=Path, required=True)
+    parser.add_argument("--child-result", type=Path, required=True)
+    args = parser.parse_args(argv)
+    source_sha = exact_sha(args.source_sha, "workflow source")
+    parent_sha = exact_sha(args.parent_sha, "observed Hugging Face parent revision")
+    manifest = validate_bundle(args.bundle, source_sha)
+    token = os.environ.get("HF_TOKEN", "")
+    if not token:
+        raise RuntimeError("HF_TOKEN is required in the approved secret store")
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    args.entered_marker.parent.mkdir(parents=True, exist_ok=True)
+    with args.entered_marker.open("xb") as handle:
+        handle.write(b"UPLOAD_CALL_ENTERED\n")
+    commit = api.upload_folder(
+        repo_id=HF_REPO,
+        repo_type="space",
+        folder_path=args.bundle,
+        token=token,
+        parent_commit=parent_sha,
+        delete_patterns="*",
+        commit_message=f"Deploy GitHub source {source_sha[:12]}",
+        commit_description=(
+            f"Source: https://github.com/{SOURCE_REPO}/commit/{source_sha}\n"
+            f"Bundle: {manifest['bundle_sha256']}"
+        ),
+    )
+    target_sha = exact_sha(commit.oid, "published Hugging Face revision")
+    with args.child_result.open("xb") as handle:
+        handle.write(canonical_json({"hf_revision": target_sha}))
+    return 0
 
 
 def deploy_bundle(
@@ -405,6 +567,8 @@ def deploy_bundle(
     source_sha: str,
     result_path: Path,
     mutation_state: dict[str, object] | None = None,
+    *,
+    mutation_timeout: float = MUTATION_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
     if mutation_state is None:
         mutation_state = {}
@@ -422,18 +586,22 @@ def deploy_bundle(
     token = os.environ.get("HF_TOKEN")
     if not token:
         raise RuntimeError("HF_TOKEN is required in the approved secret store")
-    from huggingface_hub import HfApi
-
-    api = HfApi(token=token)
-    before = api.space_info(HF_REPO, token=token)
-    before_sha = exact_sha(before.sha, "observed Hugging Face parent revision")
+    mutation_deadline = time.monotonic() + mutation_timeout
+    before = _request_json_retry(
+        f"https://huggingface.co/api/spaces/{HF_REPO}",
+        deadline=mutation_deadline,
+        label="pre-mutation Hugging Face parent readback",
+    )
+    if not isinstance(before, dict):
+        raise RuntimeError("pre-mutation Hugging Face response is malformed")
+    before_sha = exact_sha(before.get("sha"), "observed Hugging Face parent revision")
 
     mutation_authorization = require_governed_main(source_sha)
     if mutation_authorization != authorization:
         raise RuntimeError("protected-main authorization changed before publication")
     mutation_boundary = {
         "schema": "szl.hf-deploy-result/v1",
-        "status": "MUTATION_BOUNDARY_CROSSED",
+        "status": "MUTATION_CHILD_PREPARED",
         "source_revision": source_sha,
         "previous_hf_revision": before_sha,
         "hf_revision": None,
@@ -444,35 +612,63 @@ def deploy_bundle(
     result_path.parent.mkdir(parents=True, exist_ok=True)
     with result_path.open("xb") as handle:
         handle.write(canonical_json(mutation_boundary))
-    mutation_state["upload_call_entered"] = True
+    nonce = f"{os.getpid()}-{time.monotonic_ns()}"
+    entered_marker = result_path.parent / f".hf-upload-entered-{nonce}"
+    child_result = result_path.parent / f".hf-upload-result-{nonce}.json"
+    remaining = mutation_deadline - time.monotonic()
+    recovery_reserve = min(MUTATION_READBACK_SECONDS, max(0.1, remaining / 4))
+    upload_deadline = mutation_deadline - recovery_reserve
+    child_command = [
+        sys.executable,
+        "-I",
+        "-P",
+        str(Path(__file__).resolve()),
+        "upload-child",
+        "--bundle",
+        str(bundle.resolve()),
+        "--source-sha",
+        source_sha,
+        "--parent-sha",
+        before_sha,
+        "--entered-marker",
+        str(entered_marker.resolve()),
+        "--child-result",
+        str(child_result.resolve()),
+    ]
     try:
-        commit = api.upload_folder(
-            repo_id=HF_REPO,
-            repo_type="space",
-            folder_path=bundle,
-            token=token,
-            parent_commit=before_sha,
-            delete_patterns="*",
-            commit_message=f"Deploy GitHub source {source_sha[:12]}",
-            commit_description=(
-                f"Source: https://github.com/{SOURCE_REPO}/commit/{source_sha}\n"
-                f"Bundle: {manifest['bundle_sha256']}"
-            ),
+        _run_killable_child(
+            child_command,
+            deadline=upload_deadline,
+            entered_marker=entered_marker,
+            mutation_state=mutation_state,
+            environment=dict(os.environ),
         )
-        target_sha = exact_sha(commit.oid, "published Hugging Face revision")
-    except Exception:
+        child_value = json.loads(child_result.read_text(encoding="utf-8"))
+        target_sha = exact_sha(
+            child_value.get("hf_revision") if isinstance(child_value, dict) else None,
+            "published Hugging Face revision",
+        )
+    except Exception as upload_error:
+        if mutation_state.get("upload_call_entered") is True:
+            mutation_boundary["status"] = "MUTATION_BOUNDARY_CROSSED"
+            result_path.write_bytes(canonical_json(mutation_boundary))
         mutation_state["authoritative_readback_attempted"] = True
         try:
-            recovered = _recover_authoritative_revision(
+            target_sha = _recover_authoritative_revision(
                 bundle,
                 manifest,
                 before_sha,
-                deadline=time.monotonic() + MUTATION_READBACK_SECONDS,
+                deadline=mutation_deadline,
             )
-        except Exception:
-            recovered = None
-        mutation_state["known_hf_revision"] = recovered
-        raise
+        except Exception as recovery_error:
+            mutation_state["known_hf_revision"] = None
+            raise recovery_error from upload_error
+    finally:
+        entered_marker.unlink(missing_ok=True)
+        child_result.unlink(missing_ok=True)
+    if mutation_state.get("upload_call_entered") is True:
+        mutation_boundary["status"] = "MUTATION_BOUNDARY_CROSSED"
+        result_path.write_bytes(canonical_json(mutation_boundary))
     mutation_state["known_hf_revision"] = target_sha
     result = {
         "schema": "szl.hf-deploy-result/v1",
@@ -748,7 +944,7 @@ def _fetch_public_index(
     expected_bytes: bytes,
     *,
     deadline: float,
-) -> bytes:
+) -> dict[str, object]:
     query = urllib.parse.urlencode({"source": exact_sha(source_sha, "workflow source")})
     root_url = origin + "/?" + query
     status, _, location = _public_response(
@@ -783,13 +979,15 @@ def _fetch_public_index(
             )
         return response
 
-    _, terminal_body, _ = _retry_exact_read(
-        read_terminal,
-        lambda response: response[1] == expected_bytes,
-        deadline=deadline,
-        mismatch_message="public index bytes differ from the bundled index",
-    )
-    return terminal_body
+    while True:
+        _, terminal_body, _ = read_terminal()
+        try:
+            return normalize_public_static_index(terminal_body, expected_bytes)
+        except RuntimeError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(RETRY_DELAY_SECONDS, remaining))
 
 
 def _static_origin() -> str:
@@ -863,6 +1061,7 @@ def _verify_exact_hf_revision(
     target_sha: str,
     *,
     deadline: float,
+    retry_byte_mismatch: bool = True,
 ) -> list[dict[str, object]]:
     target_sha = exact_sha(target_sha, "Hugging Face revision")
     tree = _request_json_retry(
@@ -929,15 +1128,20 @@ def _verify_exact_hf_revision(
                 )
             return response
 
-        _, data, _, _ = _retry_exact_read(
-            read_file,
-            lambda response: (
-                len(response[1]) == row["bytes"]
-                and hashlib.sha256(response[1]).hexdigest() == row["sha256"]
-            ),
-            deadline=deadline,
-            mismatch_message=f"public live bytes differ: {relative}",
-        )
+        if retry_byte_mismatch:
+            _, data, _, _ = _retry_exact_read(
+                read_file,
+                lambda response: (
+                    len(response[1]) == row["bytes"]
+                    and hashlib.sha256(response[1]).hexdigest() == row["sha256"]
+                ),
+                deadline=deadline,
+                mismatch_message=f"public live bytes differ: {relative}",
+            )
+        else:
+            _, data, _, _ = read_file()
+            if len(data) != row["bytes"] or sha256_bytes(data) != row["sha256"]:
+                raise RuntimeError(f"public live bytes differ: {relative}")
         verified_tree.append(
             {
                 "path": relative,
@@ -999,7 +1203,7 @@ def attest_publication(
 
     origin = _static_origin()
     query = urllib.parse.urlencode({"source": source_sha})
-    _fetch_public_index(
+    public_index = _fetch_public_index(
         origin,
         source_sha,
         (bundle / "index.html").read_bytes(),
@@ -1046,6 +1250,8 @@ def attest_publication(
     attestation = {
         "schema": "szl.hf-live-attestation/v2",
         "status": "MEASURED",
+        "receipt_minted": False,
+        "deployment_success": False,
         "source_revision": source_sha,
         "hf_revision": target_sha,
         "runtime_stage": runtime_stage,
@@ -1057,6 +1263,7 @@ def attest_publication(
             "revision": source_sha,
             "relation": SOURCE_RELATION,
         },
+        "public_index": public_index,
         "public_provenance": {
             "schema": provenance["schema"],
             "source_repository": provenance["source"]["repository"],
@@ -1152,14 +1359,21 @@ def write_workflow_stage_failure(
     failure_stage: str,
     artifact_outcome: str,
     oidc_outcome: str,
+    final_receipt_outcome: str = "skipped",
+    terminal_artifact_outcome: str = "skipped",
 ) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
-    if failure_stage not in {"SUCCESS_ARTIFACT_UPLOAD", "OIDC_RECEIPT_ATTESTATION"}:
+    if failure_stage not in {
+        "SUCCESS_ARTIFACT_UPLOAD",
+        "OIDC_RECEIPT_ATTESTATION",
+        "FINAL_RECEIPT_SYNTHESIS",
+        "TERMINAL_SUCCESS_ARTIFACT",
+    }:
         raise RuntimeError("workflow receipt failure stage is not supported")
     result = json.loads(result_path.read_text(encoding="utf-8"))
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     hf_revision = exact_sha(result.get("hf_revision"), "deployment result revision")
-    if (
+    measurement_valid = (
         result.get("source_revision") != source_sha
         or result.get("target") != HF_REPO
         or receipt.get("status") != "MEASURED"
@@ -1172,8 +1386,11 @@ def write_workflow_stage_failure(
             "revision": source_sha,
             "relation": SOURCE_RELATION,
         }
-    ):
-        raise RuntimeError("local measured receipt is not exactly source-bound")
+        or receipt.get("receipt_minted") is not False
+        or receipt.get("deployment_success") is not False
+    ) is False
+    if result.get("source_revision") != source_sha or result.get("target") != HF_REPO:
+        raise RuntimeError("deployment result is not exactly source-bound")
     evidence = {
         "schema": "szl.hf-receipt-stage-failure/v1",
         "status": "FAILED_AFTER_LOCAL_MEASUREMENT",
@@ -1187,12 +1404,78 @@ def write_workflow_stage_failure(
         "target": HF_REPO,
         "artifact_upload_outcome": artifact_outcome,
         "oidc_attestation_outcome": oidc_outcome,
+        "final_receipt_outcome": final_receipt_outcome,
+        "terminal_artifact_outcome": terminal_artifact_outcome,
+        "local_measurement_contract_valid": measurement_valid,
         "local_measured_receipt_sha256": hashlib.sha256(
             receipt_path.read_bytes()
         ).hexdigest(),
     }
     path.write_bytes(canonical_json(evidence))
     return evidence
+
+
+def synthesize_oidc_receipt(
+    output_path: Path,
+    source_sha: str,
+    result_path: Path,
+    measurement_path: Path,
+    *,
+    attestation_id: str,
+    attestation_url: str,
+    bundle_path: str,
+) -> dict[str, object]:
+    source_sha = exact_sha(source_sha, "workflow source")
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    measurement_bytes = measurement_path.read_bytes()
+    measurement = json.loads(measurement_bytes)
+    hf_revision = exact_sha(result.get("hf_revision"), "deployment result revision")
+    expected_source = {
+        "repository": SOURCE_REPO,
+        "revision": source_sha,
+        "relation": SOURCE_RELATION,
+    }
+    if (
+        result.get("source_revision") != source_sha
+        or result.get("target") != HF_REPO
+        or measurement.get("schema") != "szl.hf-live-attestation/v2"
+        or measurement.get("status") != "MEASURED"
+        or measurement.get("source") != expected_source
+        or measurement.get("source_revision") != source_sha
+        or measurement.get("hf_revision") != hf_revision
+        or measurement.get("target") != HF_REPO
+        or measurement.get("receipt_minted") is not False
+        or measurement.get("deployment_success") is not False
+    ):
+        raise RuntimeError("local measured evidence is not exactly source-bound")
+    outputs = (attestation_id, attestation_url, bundle_path)
+    if any(not isinstance(value, str) or not value or len(value) > 4096 for value in outputs):
+        raise RuntimeError("OIDC attestation outputs are incomplete")
+    parsed_url = urllib.parse.urlsplit(attestation_url)
+    if parsed_url.scheme != "https" or not parsed_url.netloc:
+        raise RuntimeError("OIDC attestation URL is not HTTPS")
+    receipt = {
+        "schema": "szl.hf-oidc-receipt/v1",
+        "status": "OIDC_ATTESTED_DEPLOYMENT",
+        "source": expected_source,
+        "source_revision": source_sha,
+        "hf_revision": hf_revision,
+        "target": HF_REPO,
+        "measurement": {
+            "path": measurement_path.name,
+            "sha256": sha256_bytes(measurement_bytes),
+        },
+        "attestation": {
+            "id": attestation_id,
+            "url": attestation_url,
+            "bundle_path": bundle_path,
+        },
+        "receipt_minted": True,
+        "deployment_success": True,
+    }
+    with output_path.open("xb") as handle:
+        handle.write(canonical_json(receipt))
+    return receipt
 
 
 def stage_failure_main(argv: list[str]) -> int:
@@ -1204,6 +1487,8 @@ def stage_failure_main(argv: list[str]) -> int:
     parser.add_argument("--failure-stage", required=True)
     parser.add_argument("--artifact-outcome", required=True)
     parser.add_argument("--oidc-outcome", required=True)
+    parser.add_argument("--final-receipt-outcome", required=True)
+    parser.add_argument("--terminal-artifact-outcome", required=True)
     args = parser.parse_args(argv)
     evidence = write_workflow_stage_failure(
         args.failure_evidence,
@@ -1213,14 +1498,43 @@ def stage_failure_main(argv: list[str]) -> int:
         failure_stage=args.failure_stage,
         artifact_outcome=args.artifact_outcome,
         oidc_outcome=args.oidc_outcome,
+        final_receipt_outcome=args.final_receipt_outcome,
+        terminal_artifact_outcome=args.terminal_artifact_outcome,
     )
     print(json.dumps(evidence, sort_keys=True))
     return 0
 
 
+def final_receipt_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument("--measurement", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--attestation-id", required=True)
+    parser.add_argument("--attestation-url", required=True)
+    parser.add_argument("--bundle-path", required=True)
+    args = parser.parse_args(argv)
+    receipt = synthesize_oidc_receipt(
+        args.output,
+        args.source_sha,
+        args.result,
+        args.measurement,
+        attestation_id=args.attestation_id,
+        attestation_url=args.attestation_url,
+        bundle_path=args.bundle_path,
+    )
+    print(json.dumps(receipt, sort_keys=True))
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "upload-child":
+        return upload_child_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "stage-failure":
         return stage_failure_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "final-receipt":
+        return final_receipt_main(sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)

@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 from html.parser import HTMLParser
 import json
+import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -15,12 +17,15 @@ import urllib.parse
 from scripts.build_hf_space_bundle import build_bundle
 from scripts.deploy_hf_space import (
     GOVERNED_RULESET_ID,
+    HF_WINDOW_MAX_INJECTION_BYTES,
     HF_REPO,
     REQUIRED_RULE_TYPES as REQUIRED_RULE_TYPES_FOR_TEST,
     RetryExhausted,
     SOURCE_RELATION,
     SOURCE_REPO,
     _fetch_public_index,
+    _recover_authoritative_revision,
+    _run_killable_child,
     _public_bytes,
     _request_json_retry,
     _static_origin,
@@ -30,7 +35,9 @@ from scripts.deploy_hf_space import (
     canonical_json,
     deploy_bundle,
     evaluate_effective_rulesets,
+    normalize_public_static_index,
     require_governed_main,
+    synthesize_oidc_receipt,
     validate_bundle,
     validate_public_provenance,
     write_failure_evidence,
@@ -41,6 +48,21 @@ from scripts.deploy_hf_space import (
 SOURCE_SHA = "a" * 40
 TARGET_SHA = "b" * 40
 PARENT_SHA = "c" * 40
+LIVE_INJECTION_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "hf-static-window-huggingface-injection.html"
+)
+
+
+def inject_hf_window(index_bytes: bytes, injection: bytes | None = None) -> bytes:
+    injection = (
+        injection
+        if injection is not None
+        else LIVE_INJECTION_FIXTURE.read_bytes().rstrip(b"\r\n")
+    )
+    boundary = index_bytes.index(b"<head>") + len(b"<head>")
+    return index_bytes[:boundary] + injection + index_bytes[boundary:]
 
 
 def baseline_summary() -> dict[str, object]:
@@ -310,21 +332,39 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         final_subject = workflow.index(
             "subject-path: ${{ runner.temp }}/hf-live-attestation.json"
         )
+        final_receipt = workflow.index("Synthesize canonical OIDC success receipt")
+        terminal_success = workflow.index("Upload required terminal success evidence")
         stage_failure = workflow.index("Synthesize receipt-stage failure evidence")
         terminal_gate = workflow.index("Enforce terminal publication evidence")
         self.assertLess(publish, success_evidence)
         self.assertLess(success_evidence, final_attestation)
         self.assertLess(final_attestation, final_subject)
-        self.assertLess(final_subject, stage_failure)
+        self.assertLess(final_subject, final_receipt)
+        self.assertLess(final_receipt, terminal_success)
+        self.assertLess(terminal_success, stage_failure)
         self.assertLess(stage_failure, terminal_gate)
         self.assertEqual(workflow.count("actions/attest-build-provenance@"), 2)
         self.assertIn("id: publish-measure", workflow)
         self.assertIn("id: success-artifact", workflow)
         self.assertIn("id: oidc-receipt", workflow)
+        self.assertIn("id: final-receipt", workflow)
+        self.assertIn("id: terminal-success-artifact", workflow)
+        for output_name in ("attestation-id", "attestation-url", "bundle-path"):
+            self.assertIn(
+                "steps.oidc-receipt.outputs." + output_name,
+                workflow,
+            )
+        self.assertIn("hf-oidc-receipt.json", workflow)
+        self.assertIn("hf-space-terminal-success-evidence", workflow)
         self.assertIn("continue-on-error: true", workflow)
         self.assertIn("stage-failure", workflow)
         self.assertIn("hf-space-receipt-stage-failure", workflow)
         self.assertIn('test "${{ steps.oidc-receipt.outcome }}" = "success"', workflow)
+        self.assertIn('test "${{ steps.final-receipt.outcome }}" = "success"', workflow)
+        self.assertIn(
+            'test "${{ steps.terminal-success-artifact.outcome }}" = "success"',
+            workflow,
+        )
         self.assertIn("if-no-files-found: error", workflow)
         self.assertIn("Upload separate failed-deployment evidence", workflow)
         self.assertIn("hf-space-deployment-failure", workflow)
@@ -339,6 +379,13 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertIn("--only-binary=:all:", workflow)
         self.assertIn("--ignore-installed", workflow)
         self.assertIn('"$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P', workflow)
+        self.assertIn(
+            '"$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P -c', workflow
+        )
+        self.assertIn(
+            '"$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/build_hf_space_bundle.py',
+            workflow,
+        )
         self.assertNotIn("pip install --disable-pip-version-check huggingface", workflow)
 
         lock = (
@@ -370,6 +417,14 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertIn("--ignore-installed", contracts_workflow)
         self.assertIn(
             'huggingface_hub.__version__ == "1.19.0"', contracts_workflow
+        )
+        self.assertIn(
+            '"$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P -c',
+            contracts_workflow,
+        )
+        self.assertIn(
+            '"$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/build_hf_space_bundle.py',
+            contracts_workflow,
         )
 
     def test_inherited_projected_ruleset_is_bound_to_effective_main(self) -> None:
@@ -517,7 +572,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             if parsed.path == "/":
                 return 302, b"", "/index.html?" + parsed.query
             if parsed.path == "/index.html":
-                return 200, (bundle / "index.html").read_bytes(), None
+                return 200, inject_hf_window((bundle / "index.html").read_bytes()), None
             if parsed.path == "/SPACE_PROVENANCE.json":
                 return (
                     200,
@@ -605,6 +660,8 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
 
             self.assertEqual(evidence["schema"], "szl.hf-live-attestation/v2")
             self.assertEqual(evidence["status"], "MEASURED")
+            self.assertFalse(evidence["receipt_minted"])
+            self.assertFalse(evidence["deployment_success"])
             self.assertEqual(evidence["hf_revision"], TARGET_SHA)
             self.assertEqual(evidence["source_revision"], SOURCE_SHA)
             self.assertEqual(evidence["target"], HF_REPO)
@@ -613,6 +670,18 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             self.assertEqual(evidence["post_publication_main"], final_guard)
             self.assertRegex(evidence["bundle_sha256"], r"^[0-9a-f]{64}$")
             self.assertRegex(evidence["tree_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                evidence["public_index"]["transformation"],
+                "HF_WINDOW_HUGGINGFACE_HEAD_INJECTION_V1",
+            )
+            self.assertEqual(
+                evidence["public_index"]["normalized_sha256"],
+                hashlib.sha256((bundle / "index.html").read_bytes()).hexdigest(),
+            )
+            self.assertEqual(
+                evidence["public_index"]["injection_bytes"],
+                len(LIVE_INJECTION_FIXTURE.read_bytes().rstrip(b"\r\n")),
+            )
             self.assertEqual(
                 evidence["public_provenance"],
                 {
@@ -699,27 +768,27 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         origin = _static_origin()
         query = urllib.parse.urlencode({"source": SOURCE_SHA})
         exact_location = origin + "/index.html?" + query
-        expected = b"exact-index"
+        expected = b"<!doctype html>\n<html><head>\n</head><body>exact</body></html>\n"
+        observed = inject_hf_window(expected)
 
         with mock.patch(
             "scripts.deploy_hf_space._public_response",
             side_effect=[
                 (302, b"", exact_location),
                 (200, b"propagating", None),
-                (200, expected, None),
+                (200, observed, None),
             ],
         ), mock.patch(
             "scripts.deploy_hf_space.time.sleep"
         ):
-            self.assertEqual(
-                _fetch_public_index(
+            measurement = _fetch_public_index(
                     origin,
                     SOURCE_SHA,
                     expected,
                     deadline=float("inf"),
-                ),
-                expected,
-            )
+                )
+            self.assertEqual(measurement["normalized_sha256"], hashlib.sha256(expected).hexdigest())
+            self.assertEqual(measurement["injection_sha256"], hashlib.sha256(LIVE_INJECTION_FIXTURE.read_bytes().rstrip(b"\r\n")).hexdigest())
 
         failures = (
             ("direct root 200", [(200, expected, None)], "exactly one 302"),
@@ -765,13 +834,44 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         ), mock.patch(
             "scripts.deploy_hf_space.time.monotonic",
             return_value=1.0,
-        ), self.assertRaisesRegex(RuntimeError, "bytes differ"):
+        ), self.assertRaisesRegex(RuntimeError, "platform injection"):
             _fetch_public_index(
                 origin,
                 SOURCE_SHA,
                 expected,
                 deadline=0.5,
             )
+
+    def test_live_hf_window_fixture_has_one_strict_normalizable_injection(self) -> None:
+        immutable = b"<!doctype html>\n<html><head>\n</head><body>exact</body></html>\n"
+        fixture = LIVE_INJECTION_FIXTURE.read_bytes().rstrip(b"\r\n")
+        observed = inject_hf_window(immutable, fixture)
+        measurement = normalize_public_static_index(observed, immutable)
+        self.assertEqual(measurement["normalized_sha256"], hashlib.sha256(immutable).hexdigest())
+        self.assertEqual(measurement["injection_sha256"], hashlib.sha256(fixture).hexdigest())
+        self.assertEqual(measurement["injection_bytes"], len(fixture))
+
+        boundary = immutable.index(b"<head>") + len(b"<head>")
+        oversized = (
+            b'<script>window.huggingface={variables:{"x":"'
+            + b"a" * HF_WINDOW_MAX_INJECTION_BYTES
+            + b'"}};</script>'
+        )
+        invalid = {
+            "zero": immutable,
+            "multiple": inject_hf_window(inject_hf_window(immutable, fixture), fixture),
+            "wrong_location": immutable[: boundary + 1] + fixture + immutable[boundary + 1 :],
+            "wrong_prefix": inject_hf_window(immutable, fixture.replace(b"window.huggingface=", b"window.huggingface =")),
+            "non_object": inject_hf_window(immutable, b"<script>window.huggingface=[];</script>"),
+            "oversize": inject_hf_window(immutable, oversized),
+            "nested_markup": inject_hf_window(immutable, b'<script>window.huggingface={variables:{"x":"<b>"}};</script>'),
+            "extra_script": inject_hf_window(immutable, fixture + b"<script>extra()</script>"),
+            "extra_byte": inject_hf_window(immutable, fixture + b"x"),
+            "bad_terminator": inject_hf_window(immutable, fixture.replace(b";</script>", b" </script>")),
+        }
+        for label, candidate in invalid.items():
+            with self.subTest(label=label), self.assertRaises(RuntimeError):
+                normalize_public_static_index(candidate, immutable)
 
     def test_transient_reads_are_bounded_and_all_5xx_retry(self) -> None:
         origin = _static_origin()
@@ -988,30 +1088,30 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             build_bundle(bundle, SOURCE_SHA)
             result = Path(temporary) / "result.json"
             state: dict[str, object] = {}
-            api = mock.Mock()
-            api.space_info.return_value = mock.Mock(sha=PARENT_SHA)
-            api.upload_folder.side_effect = TimeoutError("transport reset")
-            module = types.ModuleType("huggingface_hub")
-            module.HfApi = lambda token: api
             environment = {"HF_TOKEN": "test-hf-token"}
-            with mock.patch.dict("os.environ", environment, clear=True), mock.patch.dict(
-                sys.modules, {"huggingface_hub": module}
-            ), mock.patch(
+            def hanging_child(_command, *, entered_marker, mutation_state, **_kwargs):
+                entered_marker.write_text("entered", encoding="utf-8")
+                mutation_state["upload_call_entered"] = True
+                raise TimeoutError("transport reset")
+
+            with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
                 "scripts.deploy_hf_space.require_governed_main",
                 return_value={"status": "AUTHORIZED"},
             ), mock.patch(
+                "scripts.deploy_hf_space._request_json_retry",
+                return_value={"sha": PARENT_SHA},
+            ), mock.patch(
+                "scripts.deploy_hf_space._run_killable_child",
+                side_effect=hanging_child,
+            ), mock.patch(
                 "scripts.deploy_hf_space._recover_authoritative_revision",
-                return_value=None,
-            ), self.assertRaises(TimeoutError):
+                side_effect=RetryExhausted("parent persisted"),
+            ), self.assertRaises(RetryExhausted):
                 deploy_bundle(bundle, SOURCE_SHA, result, state)
 
             self.assertTrue(state["upload_call_entered"])
             self.assertTrue(state["authoritative_readback_attempted"])
             self.assertIsNone(state["known_hf_revision"])
-            api.upload_folder.assert_called_once()
-            upload = api.upload_folder.call_args.kwargs
-            self.assertEqual(upload["parent_commit"], PARENT_SHA)
-            self.assertEqual(upload["delete_patterns"], "*")
             boundary = json.loads(result.read_text(encoding="utf-8"))
             self.assertEqual(boundary["status"], "MUTATION_BOUNDARY_CROSSED")
             self.assertEqual(boundary["previous_hf_revision"], PARENT_SHA)
@@ -1061,6 +1161,130 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 json.loads(before.read_text(encoding="utf-8"))["status"],
                 "FAILED_BEFORE_MUTATION",
             )
+
+    def test_real_hanging_child_is_killed_with_bounded_unknown_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / "entered"
+            result = root / "result.json"
+            result.write_bytes(canonical_json({
+                "schema": "szl.hf-deploy-result/v1",
+                "status": "MUTATION_BOUNDARY_CROSSED",
+                "source_revision": SOURCE_SHA,
+                "previous_hf_revision": PARENT_SHA,
+                "hf_revision": None,
+                "bundle_sha256": "d" * 64,
+                "target": HF_REPO,
+            }))
+            command = [
+                sys.executable,
+                "-I",
+                "-P",
+                "-c",
+                "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('entered'); time.sleep(60)",
+                str(marker),
+            ]
+            state: dict[str, object] = {}
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                _run_killable_child(
+                    command,
+                    deadline=time.monotonic() + 0.25,
+                    entered_marker=marker,
+                    mutation_state=state,
+                    environment=dict(os.environ),
+                )
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertTrue(state["upload_call_entered"])
+            failure = root / "failure.json"
+            write_failure_evidence(failure, SOURCE_SHA, TimeoutError("child timeout"), result, state)
+            evidence = json.loads(failure.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["status"], "MUTATION_OUTCOME_UNKNOWN")
+            self.assertFalse(evidence["receipt_minted"])
+
+    def test_ambiguous_recovery_waits_for_parent_then_accepts_only_exact_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "bundle"
+            manifest = build_bundle(bundle, SOURCE_SHA)
+            with mock.patch(
+                "scripts.deploy_hf_space._request_json_retry",
+                side_effect=[{"sha": PARENT_SHA}, {"sha": PARENT_SHA}, {"sha": TARGET_SHA}],
+            ), mock.patch(
+                "scripts.deploy_hf_space._verify_exact_hf_revision",
+                return_value=[],
+            ) as verify, mock.patch("scripts.deploy_hf_space.time.sleep"):
+                recovered = _recover_authoritative_revision(
+                    bundle, manifest, PARENT_SHA, deadline=float("inf")
+                )
+            self.assertEqual(recovered, TARGET_SHA)
+            verify.assert_called_once_with(
+                bundle, manifest, TARGET_SHA, deadline=float("inf"), retry_byte_mismatch=False
+            )
+
+            with mock.patch(
+                "scripts.deploy_hf_space._request_json_retry",
+                return_value={"sha": TARGET_SHA},
+            ), mock.patch(
+                "scripts.deploy_hf_space._verify_exact_hf_revision",
+                side_effect=RuntimeError("unrelated bytes"),
+            ), self.assertRaisesRegex(RuntimeError, "ambiguous mutation conflict"):
+                _recover_authoritative_revision(
+                    bundle, manifest, PARENT_SHA, deadline=float("inf")
+                )
+
+    def test_post_oidc_receipt_is_canonical_and_requires_false_local_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = root / "result.json"
+            measurement = root / "measurement.json"
+            output = root / "hf-oidc-receipt.json"
+            result.write_bytes(canonical_json({
+                "source_revision": SOURCE_SHA,
+                "target": HF_REPO,
+                "hf_revision": TARGET_SHA,
+            }))
+            measured = {
+                "schema": "szl.hf-live-attestation/v2",
+                "status": "MEASURED",
+                "source": {"repository": SOURCE_REPO, "revision": SOURCE_SHA, "relation": SOURCE_RELATION},
+                "source_revision": SOURCE_SHA,
+                "hf_revision": TARGET_SHA,
+                "target": HF_REPO,
+                "receipt_minted": False,
+                "deployment_success": False,
+            }
+            measurement.write_bytes(canonical_json(measured))
+            receipt = synthesize_oidc_receipt(
+                output,
+                SOURCE_SHA,
+                result,
+                measurement,
+                attestation_id="attestation-id",
+                attestation_url="https://github.com/attestations/attestation-id",
+                bundle_path="/runner/attestation.jsonl",
+            )
+            self.assertTrue(receipt["receipt_minted"])
+            self.assertTrue(receipt["deployment_success"])
+            self.assertEqual(receipt["source"], measured["source"])
+            self.assertEqual(receipt["hf_revision"], TARGET_SHA)
+            self.assertEqual(output.read_bytes(), canonical_json(receipt))
+
+            for field in ("receipt_minted", "deployment_success"):
+                invalid = dict(measured)
+                invalid[field] = True
+                measurement.write_bytes(canonical_json(invalid))
+                rejected = root / f"rejected-{field}.json"
+                with self.assertRaisesRegex(RuntimeError, "not exactly source-bound"):
+                    synthesize_oidc_receipt(
+                        rejected,
+                        SOURCE_SHA,
+                        result,
+                        measurement,
+                        attestation_id="attestation-id",
+                        attestation_url="https://github.com/attestations/attestation-id",
+                        bundle_path="/runner/attestation.jsonl",
+                    )
+                self.assertFalse(rejected.exists())
 
     def test_workflow_stage_failure_is_machine_readable_and_never_success(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1113,3 +1337,5 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    normalize_public_static_index,
+    synthesize_oidc_receipt,
