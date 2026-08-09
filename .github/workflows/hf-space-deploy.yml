@@ -194,10 +194,6 @@ jobs:
           else
             failure_stage="TERMINAL_SUCCESS_ARTIFACT"
           fi
-          rm -f \
-            "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json" \
-            "$RUNNER_TEMP/hf-canonical-success-receipt.json" \
-            "$RUNNER_TEMP/hf-oidc-attestation-envelope.json"
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py stage-failure \
             --source-sha "$GITHUB_SHA" \
             --result "$RUNNER_TEMP/hf-deploy-result.json" \
@@ -208,7 +204,10 @@ jobs:
             --candidate-receipt-outcome "${{ steps.candidate-receipt.outcome }}" \
             --oidc-outcome "${{ steps.oidc-receipt.outcome }}" \
             --finalize-receipt-outcome "${{ steps.finalize-receipt.outcome }}" \
-            --terminal-artifact-outcome "${{ steps.terminal-success-artifact.outcome }}"
+            --terminal-artifact-outcome "${{ steps.terminal-success-artifact.outcome }}" \
+            --cleanup-path "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json" \
+            --cleanup-path "$RUNNER_TEMP/hf-canonical-success-receipt.json" \
+            --cleanup-path "$RUNNER_TEMP/hf-oidc-attestation-envelope.json"
       - name: Upload receipt-stage failure evidence primary
         id: receipt-stage-failure-artifact-primary
         if: always() && steps.receipt-stage-failure.outcome == 'success'

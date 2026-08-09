@@ -498,6 +498,10 @@ def _run_killable_child(
     mutation_state: dict[str, object],
     environment: dict[str, str] | None = None,
 ) -> None:
+    wait_timeout = _remaining_timeout(
+        deadline,
+        max(0.001, deadline - time.monotonic()),
+    )
     process = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
@@ -507,20 +511,37 @@ def _run_killable_child(
         start_new_session=os.name != "nt",
     )
     try:
-        process.wait(timeout=_remaining_timeout(deadline, max(0.001, deadline - time.monotonic())))
+        wait_timeout = _remaining_timeout(deadline, wait_timeout)
+        process.wait(timeout=wait_timeout)
     except subprocess.TimeoutExpired:
         mutation_state["upload_call_entered"] = entered_marker.is_file()
-        process.kill()
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            pass
+        _kill_and_reap_child(process)
         raise TimeoutError("Hugging Face upload child exceeded its wall-clock deadline") from None
+    except BaseException:
+        mutation_state["upload_call_entered"] = entered_marker.is_file()
+        _kill_and_reap_child(process)
+        raise
     finally:
         if entered_marker.is_file():
             mutation_state["upload_call_entered"] = True
     if process.returncode != 0:
         raise RuntimeError("Hugging Face upload child failed")
+
+
+def _kill_and_reap_child(process: subprocess.Popen[bytes]) -> None:
+    """Boundedly terminate and reap a spawned upload child."""
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                "Hugging Face upload child could not be reaped after termination"
+            ) from error
 
 
 def upload_child_main(argv: list[str]) -> int:
@@ -1362,6 +1383,7 @@ def write_workflow_stage_failure(
     oidc_outcome: str,
     finalize_receipt_outcome: str = "skipped",
     terminal_artifact_outcome: str = "skipped",
+    cleanup_complete: bool = True,
 ) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
     if failure_stage not in {
@@ -1372,50 +1394,186 @@ def write_workflow_stage_failure(
         "TERMINAL_SUCCESS_ARTIFACT",
     }:
         raise RuntimeError("workflow receipt failure stage is not supported")
-    result = json.loads(result_path.read_text(encoding="utf-8"))
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    hf_revision = exact_sha(result.get("hf_revision"), "deployment result revision")
+    result_status, result_bytes, result = _read_workflow_json(result_path)
+    measurement_status, measurement_bytes, measurement = _read_workflow_json(
+        receipt_path
+    )
+    violations: list[str] = []
+    if result is not None and measurement is not None and measurement_bytes is not None:
+        violations = _success_contract_violations(
+            source_sha,
+            result,
+            measurement,
+            measurement_bytes,
+        )
+        if any(item.startswith("result.") for item in violations):
+            result_status = "INVALID_CONTRACT"
+        if any(item.startswith("measurement.") for item in violations):
+            measurement_status = "INVALID_CONTRACT"
+        if any(item.startswith("cross.") for item in violations):
+            result_status = "CONTRADICTED"
+            measurement_status = "CONTRADICTED"
     measurement_valid = (
-        result.get("source_revision") != source_sha
-        or result.get("target") != HF_REPO
-        or receipt.get("status") != "MEASURED"
-        or receipt.get("source_revision") != source_sha
-        or receipt.get("hf_revision") != hf_revision
-        or receipt.get("target") != HF_REPO
-        or receipt.get("source")
-        != {
-            "repository": SOURCE_REPO,
-            "revision": source_sha,
-            "relation": SOURCE_RELATION,
-        }
-        or receipt.get("receipt_minted") is not False
-        or receipt.get("deployment_success") is not False
-    ) is False
-    if result.get("source_revision") != source_sha or result.get("target") != HF_REPO:
-        raise RuntimeError("deployment result is not exactly source-bound")
+        result_status == "PARSED"
+        and measurement_status == "PARSED"
+        and not violations
+    )
+
+    def sanitized_outcome(value: str) -> str:
+        return value if value in STEP_OUTCOMES else "unknown"
+
     evidence = {
-        "schema": "szl.hf-receipt-stage-failure/v2",
-        "status": "FAILED_AFTER_LOCAL_MEASUREMENT",
+        "schema": "szl.hf-receipt-stage-failure/v3",
+        "status": (
+            "FAILED_AFTER_LOCAL_MEASUREMENT"
+            if measurement_valid
+            else "WORKFLOW_STAGE_FAILURE"
+        ),
         "failure_stage": failure_stage,
         "deployment_success": False,
         "receipt_minted": False,
         "source_repository": SOURCE_REPO,
         "source_revision": source_sha,
         "source_relation": SOURCE_RELATION,
-        "hf_revision": hf_revision,
         "target": HF_REPO,
-        "artifact_upload_outcome": artifact_outcome,
-        "candidate_receipt_outcome": candidate_receipt_outcome,
-        "oidc_attestation_outcome": oidc_outcome,
-        "finalize_receipt_outcome": finalize_receipt_outcome,
-        "terminal_artifact_outcome": terminal_artifact_outcome,
+        "artifact_upload_outcome": sanitized_outcome(artifact_outcome),
+        "candidate_receipt_outcome": sanitized_outcome(candidate_receipt_outcome),
+        "oidc_attestation_outcome": sanitized_outcome(oidc_outcome),
+        "finalize_receipt_outcome": sanitized_outcome(finalize_receipt_outcome),
+        "terminal_artifact_outcome": sanitized_outcome(terminal_artifact_outcome),
+        "cleanup_complete": cleanup_complete is True,
+        "result_input_status": result_status,
+        "measurement_input_status": measurement_status,
+        "contract_violations": violations,
         "local_measurement_contract_valid": measurement_valid,
-        "local_measured_receipt_sha256": hashlib.sha256(
-            receipt_path.read_bytes()
-        ).hexdigest(),
     }
+    if measurement_valid:
+        evidence.update(
+            {
+                "hf_revision": result["hf_revision"],
+                "bundle_sha256": measurement["bundle_sha256"],
+                "local_measured_receipt_sha256": hashlib.sha256(
+                    measurement_bytes
+                ).hexdigest(),
+                "deployment_result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(canonical_json(evidence))
     return evidence
+
+
+MAX_WORKFLOW_EVIDENCE_BYTES = 1024 * 1024
+
+
+def _read_workflow_json(
+    path: Path,
+) -> tuple[str, bytes | None, dict[str, object] | None]:
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError:
+        return "MISSING", None, None
+    except OSError:
+        return "UNREADABLE", None, None
+    if len(payload) > MAX_WORKFLOW_EVIDENCE_BYTES:
+        return "OVERSIZED", None, None
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "INVALID_JSON", None, None
+    if not isinstance(parsed, dict):
+        return "INVALID_CONTRACT", payload, None
+    return "PARSED", payload, parsed
+
+
+def _success_contract_violations(
+    source_sha: str,
+    result: dict[str, object],
+    measurement: dict[str, object],
+    measurement_bytes: bytes,
+) -> list[str]:
+    expected_source = {
+        "repository": SOURCE_REPO,
+        "revision": source_sha,
+        "relation": SOURCE_RELATION,
+    }
+    violations: list[str] = []
+
+    if result.get("schema") != "szl.hf-deploy-result/v1":
+        violations.append("result.schema")
+    if result.get("source_revision") != source_sha:
+        violations.append("result.source_revision")
+    if result.get("target") != HF_REPO:
+        violations.append("result.target")
+    if not isinstance(result.get("hf_revision"), str) or not HEX40.fullmatch(
+        result["hf_revision"]
+    ):
+        violations.append("result.hf_revision")
+    result_bundle = result.get("bundle_sha256")
+    if not isinstance(result_bundle, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", result_bundle
+    ):
+        violations.append("result.bundle_sha256")
+
+    if measurement_bytes != canonical_json(measurement):
+        violations.append("measurement.canonical_json")
+    if measurement.get("schema") != "szl.hf-live-attestation/v2":
+        violations.append("measurement.schema")
+    if measurement.get("status") != "MEASURED":
+        violations.append("measurement.status")
+    if measurement.get("source") != expected_source:
+        violations.append("measurement.source")
+    if measurement.get("source_revision") != source_sha:
+        violations.append("measurement.source_revision")
+    if measurement.get("hf_revision") != result.get("hf_revision"):
+        violations.append("cross.hf_revision")
+    if measurement.get("target") != HF_REPO:
+        violations.append("measurement.target")
+    if measurement.get("receipt_minted") is not False:
+        violations.append("measurement.receipt_minted")
+    if measurement.get("deployment_success") is not False:
+        violations.append("measurement.deployment_success")
+    if measurement.get("runtime_stage") != "RUNNING":
+        violations.append("measurement.runtime_stage")
+    file_count = measurement.get("file_count")
+    if not isinstance(file_count, int) or isinstance(file_count, bool) or file_count <= 0:
+        violations.append("measurement.file_count")
+    measurement_bundle = measurement.get("bundle_sha256")
+    if not isinstance(measurement_bundle, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", measurement_bundle
+    ):
+        violations.append("measurement.bundle_sha256")
+    if (
+        isinstance(result_bundle, str)
+        and isinstance(measurement_bundle, str)
+        and result_bundle != measurement_bundle
+    ):
+        violations.append("cross.bundle_sha256")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(measurement.get("tree_sha256", ""))):
+        violations.append("measurement.tree_sha256")
+
+    public_index = measurement.get("public_index")
+    if not isinstance(public_index, dict) or public_index.get("verified") is not True:
+        violations.append("measurement.public_index_verified")
+    post_publication_main = measurement.get("post_publication_main")
+    if (
+        not isinstance(post_publication_main, dict)
+        or post_publication_main.get("status") != "AUTHORIZED"
+    ):
+        violations.append("measurement.post_publication_main_authorized")
+    public_provenance = measurement.get("public_provenance")
+    if not isinstance(public_provenance, dict):
+        violations.append("measurement.public_provenance")
+    else:
+        if public_provenance.get("verified") is not True:
+            violations.append("measurement.public_provenance_verified")
+        if public_provenance.get("source_repository") != SOURCE_REPO:
+            violations.append("measurement.public_provenance_repository")
+        if public_provenance.get("source_revision") != source_sha:
+            violations.append("measurement.public_provenance_revision")
+        if public_provenance.get("relation") != SOURCE_RELATION:
+            violations.append("measurement.public_provenance_relation")
+    return violations
 
 
 def _canonical_success_receipt(
@@ -1427,36 +1585,19 @@ def _canonical_success_receipt(
     result = json.loads(result_path.read_text(encoding="utf-8"))
     measurement_bytes = measurement_path.read_bytes()
     measurement = json.loads(measurement_bytes)
-    hf_revision = exact_sha(result.get("hf_revision"), "deployment result revision")
-    expected_source = {
-        "repository": SOURCE_REPO,
-        "revision": source_sha,
-        "relation": SOURCE_RELATION,
-    }
-    if (
-        result.get("source_revision") != source_sha
-        or result.get("target") != HF_REPO
-        or measurement_bytes != canonical_json(measurement)
-        or measurement.get("schema") != "szl.hf-live-attestation/v2"
-        or measurement.get("status") != "MEASURED"
-        or measurement.get("source") != expected_source
-        or measurement.get("source_revision") != source_sha
-        or measurement.get("hf_revision") != hf_revision
-        or measurement.get("target") != HF_REPO
-        or measurement.get("receipt_minted") is not False
-        or measurement.get("deployment_success") is not False
-        or measurement.get("runtime_stage") != "RUNNING"
-        or not isinstance(measurement.get("file_count"), int)
-        or isinstance(measurement.get("file_count"), bool)
-        or measurement.get("file_count", 0) <= 0
-        or not isinstance(measurement.get("public_index"), dict)
-        or not isinstance(measurement.get("post_publication_main"), dict)
-        or not isinstance(measurement.get("public_provenance"), dict)
-        or measurement["public_provenance"].get("verified") is not True
-        or not re.fullmatch(r"[0-9a-f]{64}", str(measurement.get("bundle_sha256", "")))
-        or not re.fullmatch(r"[0-9a-f]{64}", str(measurement.get("tree_sha256", "")))
-    ):
+    if not isinstance(result, dict) or not isinstance(measurement, dict):
         raise RuntimeError("local measured evidence is not exactly source-bound and complete")
+    violations = _success_contract_violations(
+        source_sha,
+        result,
+        measurement,
+        measurement_bytes,
+    )
+    if violations:
+        raise RuntimeError(
+            "local measured evidence is not exactly source-bound and complete: "
+            + ",".join(violations)
+        )
     receipt = dict(measurement)
     receipt.update(
         {
@@ -1581,7 +1722,13 @@ def enforce_terminal_evidence(
         "receipt_promotion": finalize_receipt_outcome,
         "terminal_artifact": terminal_artifact_outcome,
     }
-    if any(outcome not in STEP_OUTCOMES for outcome in success_path.values()):
+    all_outcomes = {
+        **success_path,
+        "failure_synthesis": failure_synthesis_outcome,
+        "failure_artifact_primary": failure_artifact_primary_outcome,
+        "failure_artifact_retry": failure_artifact_retry_outcome,
+    }
+    if any(outcome not in STEP_OUTCOMES for outcome in all_outcomes.values()):
         raise RuntimeError("terminal publication outcome is malformed")
     receipt_failure_required = publish_outcome == "success" and any(
         outcome != "success"
@@ -1601,6 +1748,17 @@ def enforce_terminal_evidence(
     return {"status": "TERMINAL_PUBLICATION_EVIDENCE_COMPLETE"}
 
 
+def cleanup_terminal_success_files(paths: list[Path]) -> bool:
+    """Remove local success-looking files without recursively deleting anything."""
+    complete = True
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            complete = False
+    return complete
+
+
 def stage_failure_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-sha", required=True)
@@ -1613,7 +1771,9 @@ def stage_failure_main(argv: list[str]) -> int:
     parser.add_argument("--oidc-outcome", required=True)
     parser.add_argument("--finalize-receipt-outcome", required=True)
     parser.add_argument("--terminal-artifact-outcome", required=True)
+    parser.add_argument("--cleanup-path", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
+    cleanup_complete = cleanup_terminal_success_files(args.cleanup_path)
     evidence = write_workflow_stage_failure(
         args.failure_evidence,
         args.source_sha,
@@ -1625,6 +1785,7 @@ def stage_failure_main(argv: list[str]) -> int:
         oidc_outcome=args.oidc_outcome,
         finalize_receipt_outcome=args.finalize_receipt_outcome,
         terminal_artifact_outcome=args.terminal_artifact_outcome,
+        cleanup_complete=cleanup_complete,
     )
     print(json.dumps(evidence, sort_keys=True))
     return 0

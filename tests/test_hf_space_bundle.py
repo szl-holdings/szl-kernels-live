@@ -33,6 +33,7 @@ from scripts.deploy_hf_space import (
     _wait_for_exact_running,
     attest_publication,
     canonical_json,
+    cleanup_terminal_success_files,
     deploy_bundle,
     enforce_terminal_evidence,
     evaluate_effective_rulesets,
@@ -372,6 +373,9 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertIn("hf-space-receipt-stage-failure", workflow)
         self.assertIn("scripts/deploy_hf_space.py enforce-terminal", workflow)
         for outcome_binding in (
+            '--publish-outcome "${{ steps.publish-measure.outcome }}"',
+            '--artifact-outcome "${{ steps.success-artifact.outcome }}"',
+            '--candidate-receipt-outcome "${{ steps.candidate-receipt.outcome }}"',
             '--oidc-outcome "${{ steps.oidc-receipt.outcome }}"',
             '--finalize-receipt-outcome "${{ steps.finalize-receipt.outcome }}"',
             '--terminal-artifact-outcome "${{ steps.terminal-success-artifact.outcome }}"',
@@ -389,10 +393,12 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         )
         self.assertIn("--failure-artifact-primary-outcome", workflow)
         self.assertIn("--failure-artifact-retry-outcome", workflow)
-        self.assertIn(
-            'rm -f \\\n            "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json"',
-            workflow,
-        )
+        for cleanup_path in (
+            "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json",
+            "$RUNNER_TEMP/hf-canonical-success-receipt.json",
+            "$RUNNER_TEMP/hf-oidc-attestation-envelope.json",
+        ):
+            self.assertIn(f'--cleanup-path "{cleanup_path}"', workflow)
         self.assertIn("if-no-files-found: error", workflow)
         self.assertIn("Upload separate failed-deployment evidence", workflow)
         self.assertIn("hf-space-deployment-failure", workflow)
@@ -1230,6 +1236,60 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             self.assertEqual(evidence["status"], "MUTATION_OUTCOME_UNKNOWN")
             self.assertFalse(evidence["receipt_minted"])
 
+    def test_upload_child_deadline_and_exception_paths_are_killed_and_reaped(self) -> None:
+        marker = Path("entered-marker")
+        command = [sys.executable, "-c", "pass"]
+        state: dict[str, object] = {}
+        with mock.patch(
+            "scripts.deploy_hf_space._remaining_timeout",
+            side_effect=RetryExhausted("deadline expired before spawn"),
+        ), mock.patch("scripts.deploy_hf_space.subprocess.Popen") as popen, self.assertRaises(
+            RetryExhausted
+        ):
+            _run_killable_child(
+                command,
+                deadline=0.0,
+                entered_marker=marker,
+                mutation_state=state,
+            )
+        popen.assert_not_called()
+
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        with mock.patch(
+            "scripts.deploy_hf_space._remaining_timeout",
+            side_effect=[1.0, RetryExhausted("deadline expired after spawn")],
+        ), mock.patch(
+            "scripts.deploy_hf_space.subprocess.Popen", return_value=process
+        ), self.assertRaises(RetryExhausted):
+            _run_killable_child(
+                command,
+                deadline=1.0,
+                entered_marker=marker,
+                mutation_state={},
+            )
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=1)
+
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [RuntimeError("wait failed"), 0]
+        with mock.patch(
+            "scripts.deploy_hf_space._remaining_timeout",
+            side_effect=[1.0, 1.0],
+        ), mock.patch(
+            "scripts.deploy_hf_space.subprocess.Popen", return_value=process
+        ), self.assertRaisesRegex(RuntimeError, "wait failed"):
+            _run_killable_child(
+                command,
+                deadline=1.0,
+                entered_marker=marker,
+                mutation_state={},
+            )
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.wait.call_args_list[-1], mock.call(timeout=1))
+
     def test_ambiguous_recovery_waits_for_parent_then_accepts_only_exact_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / "bundle"
@@ -1270,11 +1330,14 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             envelope_path = root / "hf-oidc-attestation-envelope.json"
             bundle = root / "attestation.jsonl"
             bundle.write_bytes(b"signed-attestation-bundle\n")
-            result.write_bytes(canonical_json({
+            deployment_result = {
+                "schema": "szl.hf-deploy-result/v1",
                 "source_revision": SOURCE_SHA,
                 "target": HF_REPO,
                 "hf_revision": TARGET_SHA,
-            }))
+                "bundle_sha256": "d" * 64,
+            }
+            result.write_bytes(canonical_json(deployment_result))
             measured = {
                 "schema": "szl.hf-live-attestation/v2",
                 "status": "MEASURED",
@@ -1287,7 +1350,12 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "file_count": 10,
                 "tree_sha256": "e" * 64,
                 "public_index": {"verified": True},
-                "public_provenance": {"verified": True},
+                "public_provenance": {
+                    "verified": True,
+                    "source_repository": SOURCE_REPO,
+                    "source_revision": SOURCE_SHA,
+                    "relation": SOURCE_RELATION,
+                },
                 "post_publication_main": {"status": "AUTHORIZED"},
                 "receipt_minted": False,
                 "deployment_success": False,
@@ -1345,6 +1413,54 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     )
                 self.assertFalse(rejected.exists())
 
+            contradictions = {
+                "public-index": lambda value: value["public_index"].update(
+                    {"verified": False}
+                ),
+                "post-main": lambda value: value["post_publication_main"].update(
+                    {"status": "UNAUTHORIZED"}
+                ),
+                "provenance-repository": lambda value: value[
+                    "public_provenance"
+                ].update({"source_repository": "szl-holdings/wrong"}),
+                "provenance-revision": lambda value: value[
+                    "public_provenance"
+                ].update({"source_revision": "f" * 40}),
+                "provenance-relation": lambda value: value[
+                    "public_provenance"
+                ].update({"relation": "UNRELATED"}),
+            }
+            for label, mutate in contradictions.items():
+                invalid = json.loads(json.dumps(measured))
+                mutate(invalid)
+                measurement.write_bytes(canonical_json(invalid))
+                rejected = root / f"rejected-{label}.json"
+                with self.assertRaisesRegex(
+                    RuntimeError, "not exactly source-bound and complete"
+                ):
+                    synthesize_candidate_receipt(
+                        rejected,
+                        SOURCE_SHA,
+                        result,
+                        measurement,
+                    )
+                self.assertFalse(rejected.exists())
+
+            measurement.write_bytes(canonical_json(measured))
+            contradicted_result = dict(deployment_result)
+            contradicted_result["bundle_sha256"] = "f" * 64
+            result.write_bytes(canonical_json(contradicted_result))
+            rejected = root / "rejected-bundle-mismatch.json"
+            with self.assertRaisesRegex(RuntimeError, "cross.bundle_sha256"):
+                synthesize_candidate_receipt(
+                    rejected,
+                    SOURCE_SHA,
+                    result,
+                    measurement,
+                )
+            self.assertFalse(rejected.exists())
+            result.write_bytes(canonical_json(deployment_result))
+
     def test_receipt_failure_upload_retry_is_enforced_and_oidc_failure_is_terminal(self) -> None:
         require_receipt_failure_artifact(True, "failure", "success")
         with self.assertRaisesRegex(RuntimeError, "was not preserved"):
@@ -1367,6 +1483,77 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "was not preserved"):
             enforce_terminal_evidence(**outcomes)
 
+    def test_complete_terminal_outcome_graph_and_unknowns_fail_closed(self) -> None:
+        outcomes = {
+            "publish_outcome": "success",
+            "artifact_outcome": "success",
+            "candidate_receipt_outcome": "success",
+            "oidc_outcome": "success",
+            "finalize_receipt_outcome": "success",
+            "terminal_artifact_outcome": "success",
+            "failure_synthesis_outcome": "skipped",
+            "failure_artifact_primary_outcome": "skipped",
+            "failure_artifact_retry_outcome": "skipped",
+        }
+        self.assertEqual(
+            enforce_terminal_evidence(**outcomes)["status"],
+            "TERMINAL_PUBLICATION_EVIDENCE_COMPLETE",
+        )
+
+        for failed_stage in (
+            "artifact_outcome",
+            "candidate_receipt_outcome",
+            "oidc_outcome",
+            "finalize_receipt_outcome",
+            "terminal_artifact_outcome",
+        ):
+            failed = dict(outcomes)
+            failed[failed_stage] = "failure"
+            failed["failure_synthesis_outcome"] = "success"
+            failed["failure_artifact_primary_outcome"] = "success"
+            with self.subTest(failed_stage=failed_stage), self.assertRaisesRegex(
+                RuntimeError, "terminal publication evidence is incomplete"
+            ):
+                enforce_terminal_evidence(**failed)
+
+        primary = dict(outcomes)
+        primary["oidc_outcome"] = "failure"
+        primary["failure_synthesis_outcome"] = "success"
+        primary["failure_artifact_primary_outcome"] = "success"
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            enforce_terminal_evidence(**primary)
+
+        synthesis_failed = dict(primary)
+        synthesis_failed["failure_synthesis_outcome"] = "failure"
+        with self.assertRaisesRegex(RuntimeError, "synthesis did not succeed"):
+            enforce_terminal_evidence(**synthesis_failed)
+
+        publish_failed = dict(outcomes)
+        publish_failed["publish_outcome"] = "failure"
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            enforce_terminal_evidence(**publish_failed)
+
+        for outcome_name in outcomes:
+            malformed = dict(outcomes)
+            malformed[outcome_name] = "unknown-provider-state"
+            with self.subTest(outcome_name=outcome_name), self.assertRaisesRegex(
+                RuntimeError, "outcome is malformed"
+            ):
+                enforce_terminal_evidence(**malformed)
+
+    def test_terminal_cleanup_is_behavioral_and_nonrecursive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = [root / "candidate", root / "receipt", root / "envelope"]
+            for path in files:
+                path.write_bytes(b"terminal-looking-bytes")
+            self.assertTrue(cleanup_terminal_success_files(files))
+            self.assertTrue(all(not path.exists() for path in files))
+            directory = root / "directory"
+            directory.mkdir()
+            self.assertFalse(cleanup_terminal_success_files([directory]))
+            self.assertTrue(directory.is_dir())
+
     def test_workflow_stage_failure_is_machine_readable_and_never_success(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1376,16 +1563,19 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             result.write_bytes(
                 canonical_json(
                     {
+                        "schema": "szl.hf-deploy-result/v1",
                         "source_revision": SOURCE_SHA,
                         "target": HF_REPO,
                         "hf_revision": TARGET_SHA,
+                        "bundle_sha256": "d" * 64,
                     }
                 )
             )
             receipt.write_bytes(
                 canonical_json(
                     {
-                        "status": "MEASURED",
+                    "schema": "szl.hf-live-attestation/v2",
+                    "status": "MEASURED",
                         "source_revision": SOURCE_SHA,
                         "hf_revision": TARGET_SHA,
                         "target": HF_REPO,
@@ -1394,6 +1584,20 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                             "revision": SOURCE_SHA,
                             "relation": SOURCE_RELATION,
                         },
+                        "runtime_stage": "RUNNING",
+                        "bundle_sha256": "d" * 64,
+                        "tree_sha256": "e" * 64,
+                        "file_count": 10,
+                        "public_index": {"verified": True},
+                        "public_provenance": {
+                            "verified": True,
+                            "source_repository": SOURCE_REPO,
+                            "source_revision": SOURCE_SHA,
+                            "relation": SOURCE_RELATION,
+                        },
+                        "post_publication_main": {"status": "AUTHORIZED"},
+                        "receipt_minted": False,
+                        "deployment_success": False,
                     }
                 )
             )
@@ -1417,6 +1621,59 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             self.assertEqual(
                 output.read_bytes(), canonical_json(evidence)
             )
+
+    def test_workflow_stage_failure_always_writes_sanitized_minimal_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cases = (
+                ("missing", root / "missing-result", root / "missing-measurement"),
+                ("invalid", root / "invalid-result", root / "invalid-measurement"),
+            )
+            cases[1][1].write_bytes(b"{not-json HF_TOKEN=secret")
+            cases[1][2].write_bytes(b"[]")
+            for label, result, measurement in cases:
+                output = root / f"{label}-failure.json"
+                evidence = write_workflow_stage_failure(
+                    output,
+                    SOURCE_SHA,
+                    result,
+                    measurement,
+                    failure_stage="CANDIDATE_RECEIPT_SYNTHESIS",
+                    artifact_outcome="success",
+                    candidate_receipt_outcome="failure",
+                    oidc_outcome="skipped",
+                )
+                self.assertEqual(evidence["status"], "WORKFLOW_STAGE_FAILURE")
+                self.assertFalse(evidence["local_measurement_contract_valid"])
+                self.assertNotIn("hf_revision", evidence)
+                self.assertNotIn("local_measured_receipt_sha256", evidence)
+                self.assertNotIn("HF_TOKEN", output.read_text(encoding="utf-8"))
+                self.assertEqual(output.read_bytes(), canonical_json(evidence))
+
+            unreadable_result = root / "unreadable-result"
+            unreadable_measurement = root / "unreadable-measurement"
+            output = root / "unreadable-failure.json"
+            original_read_bytes = Path.read_bytes
+
+            def fail_reads(path: Path) -> bytes:
+                if path in {unreadable_result, unreadable_measurement}:
+                    raise PermissionError("HF_TOKEN=secret")
+                return original_read_bytes(path)
+
+            with mock.patch.object(Path, "read_bytes", fail_reads):
+                evidence = write_workflow_stage_failure(
+                    output,
+                    SOURCE_SHA,
+                    unreadable_result,
+                    unreadable_measurement,
+                    failure_stage="CANDIDATE_RECEIPT_SYNTHESIS",
+                    artifact_outcome="success",
+                    candidate_receipt_outcome="failure",
+                    oidc_outcome="skipped",
+                )
+            self.assertEqual(evidence["result_input_status"], "UNREADABLE")
+            self.assertEqual(evidence["measurement_input_status"], "UNREADABLE")
+            self.assertNotIn("HF_TOKEN", output.read_text(encoding="utf-8"))
 
 if __name__ == "__main__":
     unittest.main()
