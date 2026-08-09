@@ -16,14 +16,16 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # 15m bounded pre-mutation + 5m mutation + 10m readback + 30m terminal evidence.
-    timeout-minutes: 90
+    # 55m final-evidence deadline plus 5m runner-shutdown slack inside the 60m cap.
+    timeout-minutes: 60
     steps:
       - name: Record cumulative job budget origin
         shell: bash
         run: |
           set -euo pipefail
-          printf 'HF_JOB_STARTED_AT_EPOCH=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
+          started_at="$(date +%s)"
+          printf 'HF_JOB_STARTED_AT_EPOCH=%s\n' "$started_at" >> "$GITHUB_ENV"
+          printf 'HF_TERMINAL_DEADLINE_EPOCH=%s\n' "$((started_at + 3300))" >> "$GITHUB_ENV"
       - name: Checkout exact protected-main event
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -84,8 +86,18 @@ jobs:
           set -euo pipefail
           test -n "$GOVERNANCE_TOKEN"
           test "$GITHUB_REF" = "refs/heads/main"
+          operation_deadline="$((HF_TERMINAL_DEADLINE_EPOCH - 600))"
+          remaining="$((operation_deadline - $(date +%s)))"
+          if (( remaining <= 0 )); then
+            printf 'FAIL-CLOSED: shared operation deadline expired before protected-main readback\n' >&2
+            exit 1
+          fi
+          request_timeout=30
+          if (( remaining < request_timeout )); then
+            request_timeout="$remaining"
+          fi
           live_sha="$(
-            curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+            curl --fail --silent --show-error --connect-timeout 10 --max-time "$request_timeout" \
               --header "Authorization: Bearer $GOVERNANCE_TOKEN" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/branches/main" \
@@ -101,15 +113,17 @@ jobs:
           [[ "$HF_JOB_STARTED_AT_EPOCH" =~ ^[0-9]+$ ]]
           now="$(date +%s)"
           elapsed="$((now - HF_JOB_STARTED_AT_EPOCH))"
-          job_timeout_seconds=5400
           max_pre_mutation_seconds=900
-          minimum_post_gate_seconds=4500
-          remaining="$((job_timeout_seconds - elapsed))"
-          if (( elapsed < 0 || elapsed > max_pre_mutation_seconds || remaining < minimum_post_gate_seconds )); then
+          operation_remaining="$((HF_TERMINAL_DEADLINE_EPOCH - 600 - now))"
+          if (( elapsed < 0 || elapsed > max_pre_mutation_seconds )); then
             printf 'FAIL-CLOSED: pre-mutation budget exhausted after %ss\n' "$elapsed" >&2
             exit 1
           fi
-          printf 'Reserved 45m terminal-evidence budget after %ss pre-mutation\n' "$elapsed"
+          if (( operation_remaining < 1800 )); then
+            printf 'FAIL-CLOSED: less than 30m remains for governed mutation and public readback\n' >&2
+            exit 1
+          fi
+          printf 'Reserved 30m operation, 10m terminal-evidence, and 5m runner slack after %ss pre-mutation\n' "$elapsed"
       - name: Publish and measure exact protected-main bundle
         id: publish-measure
         env:
@@ -255,46 +269,48 @@ jobs:
           path: ${{ runner.temp }}/hf-receipt-stage-failure.json
           if-no-files-found: error
           retention-days: 90
-      - name: Require failed-deployment evidence JSON before artifact upload
-        id: deployment-failure-json
+      - name: Validate required failed-deployment receipt
+        id: deployment-failure-receipt
         if: always() && steps.publish-measure.outcome == 'failure'
         continue-on-error: true
-        shell: bash
         run: |
           set -euo pipefail
-          test -s "$RUNNER_TEMP/hf-deploy-failure.json"
-          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P -c \
-            'import json,os,pathlib,sys; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"hf-deploy-failure.json"; data=json.loads(p.read_text(encoding="utf-8")); sys.exit(0 if isinstance(data,dict) else "failed-deployment evidence must be a JSON object")'
-      - name: Upload failed-deployment evidence primary
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py validate-deployment-failure \
+            --source-sha "$GITHUB_SHA" \
+            --failure-evidence "$RUNNER_TEMP/hf-deploy-failure.json"
+      - name: Upload required failed-deployment receipt primary
         id: deployment-failure-artifact-primary
-        if: >-
-          always() && steps.publish-measure.outcome == 'failure' &&
-          steps.deployment-failure-json.outcome == 'success'
+        if: always() && steps.publish-measure.outcome == 'failure' && steps.deployment-failure-receipt.outcome == 'success'
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hf-space-deployment-failure-primary
-          path: |
-            ${{ runner.temp }}/hf-deploy-failure.json
-            ${{ runner.temp }}/hf-deploy-result.json
-            ${{ runner.temp }}/hf-live-attestation.json
+          name: hf-space-deployment-failure-receipt-primary
+          path: ${{ runner.temp }}/hf-deploy-failure.json
           if-no-files-found: error
           retention-days: 90
-      - name: Retry failed-deployment evidence upload
+      - name: Retry required failed-deployment receipt upload
         id: deployment-failure-artifact-retry
         if: >-
           always() && steps.publish-measure.outcome == 'failure' &&
-          steps.deployment-failure-json.outcome == 'success' &&
+          steps.deployment-failure-receipt.outcome == 'success' &&
           steps.deployment-failure-artifact-primary.outcome != 'success'
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hf-space-deployment-failure-retry
+          name: hf-space-deployment-failure-receipt-retry
+          path: ${{ runner.temp }}/hf-deploy-failure.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Upload optional failed-deployment supporting files
+        if: always() && steps.publish-measure.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hf-space-deployment-failure-supporting
           path: |
-            ${{ runner.temp }}/hf-deploy-failure.json
             ${{ runner.temp }}/hf-deploy-result.json
             ${{ runner.temp }}/hf-live-attestation.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 90
       - name: Enforce terminal publication evidence
         if: always()
@@ -311,5 +327,6 @@ jobs:
             --failure-synthesis-outcome "${{ steps.receipt-stage-failure.outcome }}" \
             --failure-artifact-primary-outcome "${{ steps.receipt-stage-failure-artifact-primary.outcome }}" \
             --failure-artifact-retry-outcome "${{ steps.receipt-stage-failure-artifact-retry.outcome }}" \
+            --deployment-failure-receipt-outcome "${{ steps.deployment-failure-receipt.outcome }}" \
             --deployment-failure-artifact-primary-outcome "${{ steps.deployment-failure-artifact-primary.outcome }}" \
             --deployment-failure-artifact-retry-outcome "${{ steps.deployment-failure-artifact-retry.outcome }}"

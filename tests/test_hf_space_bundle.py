@@ -44,6 +44,7 @@ from scripts.deploy_hf_space import (
     require_governed_main,
     require_receipt_failure_artifact,
     synthesize_candidate_receipt,
+    validate_deployment_failure_receipt,
     validate_bundle,
     validate_public_provenance,
     write_failure_evidence,
@@ -284,7 +285,13 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertLess(token, publish)
         self.assertNotIn("workflow_dispatch", workflow)
         self.assertIn('test "$GITHUB_REF" = "refs/heads/main"', workflow)
-        self.assertIn("--connect-timeout 10 --max-time 30", workflow)
+        self.assertIn(
+            '--connect-timeout 10 --max-time "$request_timeout"', workflow
+        )
+        self.assertIn(
+            'operation_deadline="$((HF_TERMINAL_DEADLINE_EPOCH - 600))"',
+            workflow,
+        )
         self.assertIn("branches/main", workflow)
         self.assertIn('data.get("protected") is True or sys.exit', workflow)
         self.assertIn('test "$live_sha" = "$GITHUB_SHA"', workflow)
@@ -384,6 +391,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             '--failure-synthesis-outcome "${{ steps.receipt-stage-failure.outcome }}"',
             '--failure-artifact-primary-outcome "${{ steps.receipt-stage-failure-artifact-primary.outcome }}"',
             '--failure-artifact-retry-outcome "${{ steps.receipt-stage-failure-artifact-retry.outcome }}"',
+            '--deployment-failure-receipt-outcome "${{ steps.deployment-failure-receipt.outcome }}"',
         ):
             self.assertIn(outcome_binding, workflow)
         self.assertIn("enforce-terminal", workflow)
@@ -404,8 +412,14 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", workflow)
         self.assertIn("deployment-failure-artifact-primary", workflow)
         self.assertIn("deployment-failure-artifact-retry", workflow)
-        self.assertIn("hf-space-deployment-failure-primary", workflow)
-        self.assertIn("hf-space-deployment-failure-retry", workflow)
+        self.assertIn("id: deployment-failure-receipt", workflow)
+        self.assertIn("validate-deployment-failure", workflow)
+        self.assertIn("hf-space-deployment-failure-receipt-primary", workflow)
+        self.assertIn("hf-space-deployment-failure-receipt-retry", workflow)
+        self.assertIn("hf-space-deployment-failure-supporting", workflow)
+        self.assertIn("path: ${{ runner.temp }}/hf-deploy-failure.json", workflow)
+        self.assertIn("steps.deployment-failure-receipt.outcome == 'success'", workflow)
+        self.assertIn("--deployment-failure-receipt-outcome", workflow)
         self.assertIn("--deployment-failure-artifact-primary-outcome", workflow)
         self.assertIn("--deployment-failure-artifact-retry-outcome", workflow)
         self.assertIn("hf-space-deployment-evidence", workflow)
@@ -416,13 +430,16 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         timeout = re.search(r"^\s+timeout-minutes:\s+(\d+)$", workflow, re.MULTILINE)
         self.assertIsNotNone(timeout)
         timeout_seconds = int(timeout.group(1)) * 60
-        self.assertEqual(timeout_seconds, 5400)
+        self.assertEqual(timeout_seconds, 3600)
         self.assertIn(
-            "15m bounded pre-mutation + 5m mutation + 10m readback + 30m terminal evidence",
+            "55m final-evidence deadline plus 5m runner-shutdown slack",
             workflow,
         )
         self.assertIn("Record cumulative job budget origin", workflow)
         self.assertIn("HF_JOB_STARTED_AT_EPOCH", workflow)
+        self.assertIn("HF_TERMINAL_DEADLINE_EPOCH", workflow)
+        self.assertIn("operation_remaining", workflow)
+        self.assertIn("10m terminal-evidence, and 5m runner slack", workflow)
         self.assertIn("Reserve full terminal-evidence budget before mutation", workflow)
         self.assertIn("max_pre_mutation_seconds=900", workflow)
         self.assertLess(
@@ -537,8 +554,13 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 self.assertTrue(diagnostics)
 
     def test_in_process_guard_requires_exact_effective_no_bypass_main(self) -> None:
-        def response(url: str, _token: str = "") -> object:
+        def response(
+            url: str,
+            _token: str = "",
+            timeout: float = 30,
+        ) -> object:
             self.assertEqual(_token, "test-token")
+            self.assertGreater(timeout, 0)
             if url.endswith("/repos/szl-holdings/szl-kernels-live"):
                 return {
                     "id": 1295941334,
@@ -569,8 +591,12 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 authorization["ruleset_ids"], [GOVERNED_RULESET_ID]
             )
 
-        def weakened(url: str, token: str = "") -> object:
-            value = response(url, token)
+        def weakened(
+            url: str,
+            token: str = "",
+            timeout: float = 30,
+        ) -> object:
+            value = response(url, token, timeout)
             if url.endswith(f"/rulesets/{GOVERNED_RULESET_ID}"):
                 value["bypass_actors"] = [{"actor_id": 1}]
             return value
@@ -595,6 +621,40 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         ):
             require_governed_main(SOURCE_SHA)
         request_json.assert_not_called()
+
+    def test_slow_governance_requests_deplete_one_shared_deadline(self) -> None:
+        environment = {
+            "GITHUB_REPOSITORY": SOURCE_REPO,
+            "GITHUB_REF": "refs/heads/main",
+            "GOVERNANCE_TOKEN": "governance-token",
+            "GITHUB_API_URL": "https://api.github.test",
+        }
+        clock = [0.0]
+        timeouts: list[float] = []
+        responses = [
+            {
+                "id": 1295941334,
+                "full_name": SOURCE_REPO,
+                "default_branch": "main",
+            },
+            {"protected": True, "commit": {"sha": SOURCE_SHA}},
+        ]
+
+        def slow_request(url: str, token: str = "", timeout: float = 30) -> object:
+            self.assertEqual(token, "governance-token")
+            timeouts.append(timeout)
+            clock[0] += 28 if len(timeouts) == 1 else 4
+            return responses[len(timeouts) - 1]
+
+        with mock.patch.dict(os.environ, environment, clear=True), mock.patch(
+            "scripts.deploy_hf_space.time.monotonic",
+            side_effect=lambda: clock[0],
+        ), mock.patch(
+            "scripts.deploy_hf_space._request_json",
+            side_effect=slow_request,
+        ), self.assertRaisesRegex(RetryExhausted, "shared deadline expired"):
+            require_governed_main(SOURCE_SHA, deadline=31.0)
+        self.assertEqual(timeouts, [30, 3])
 
     def _public_readback_mocks(
         self, bundle: Path, target_sha: str
@@ -971,7 +1031,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             return_value={"ok": True},
         ) as request_json, mock.patch(
             "scripts.deploy_hf_space.time.monotonic",
-            side_effect=(5.0, 5.0),
+            side_effect=(5.0, 5.0, 5.0),
         ):
             self.assertEqual(
                 _request_json_retry(
@@ -1594,6 +1654,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             "failure_synthesis_outcome": "skipped",
             "failure_artifact_primary_outcome": "skipped",
             "failure_artifact_retry_outcome": "skipped",
+            "deployment_failure_receipt_outcome": "skipped",
             "deployment_failure_artifact_primary_outcome": "skipped",
             "deployment_failure_artifact_retry_outcome": "skipped",
         }
@@ -1632,6 +1693,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
 
         publish_failed = dict(outcomes)
         publish_failed["publish_outcome"] = "failure"
+        publish_failed["deployment_failure_receipt_outcome"] = "success"
         publish_failed["deployment_failure_artifact_primary_outcome"] = "success"
         with self.assertRaisesRegex(RuntimeError, "incomplete"):
             enforce_terminal_evidence(**publish_failed)
@@ -1649,6 +1711,49 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 RuntimeError, "outcome is malformed"
             ):
                 enforce_terminal_evidence(**malformed)
+
+    def test_failed_deployment_requires_valid_receipt_not_existing_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = root / "hf-deploy-result.json"
+            result.write_bytes(canonical_json({"status": "MUTATION_BOUNDARY_CROSSED"}))
+            failure = root / "hf-deploy-failure.json"
+
+            with self.assertRaisesRegex(RuntimeError, "missing or unreadable"):
+                validate_deployment_failure_receipt(failure, SOURCE_SHA)
+            failure.write_bytes(b"")
+            with self.assertRaisesRegex(RuntimeError, "empty"):
+                validate_deployment_failure_receipt(failure, SOURCE_SHA)
+            failure.write_bytes(canonical_json({"schema": "szl.hf-deploy-failure/v2"}))
+            with self.assertRaisesRegex(RuntimeError, "fields are not exact"):
+                validate_deployment_failure_receipt(failure, SOURCE_SHA)
+
+            write_failure_evidence(
+                failure,
+                SOURCE_SHA,
+                RuntimeError("publication failed"),
+                result,
+                {"upload_call_entered": False},
+            )
+            receipt = validate_deployment_failure_receipt(failure, SOURCE_SHA)
+            self.assertEqual(receipt["status"], "FAILED_BEFORE_MUTATION")
+
+            outcomes = {
+                "publish_outcome": "failure",
+                "artifact_outcome": "skipped",
+                "candidate_receipt_outcome": "skipped",
+                "oidc_outcome": "skipped",
+                "finalize_receipt_outcome": "skipped",
+                "terminal_artifact_outcome": "skipped",
+                "failure_synthesis_outcome": "skipped",
+                "failure_artifact_primary_outcome": "skipped",
+                "failure_artifact_retry_outcome": "skipped",
+                "deployment_failure_receipt_outcome": "failure",
+                "deployment_failure_artifact_primary_outcome": "success",
+                "deployment_failure_artifact_retry_outcome": "skipped",
+            }
+            with self.assertRaisesRegex(RuntimeError, "validation did not succeed"):
+                enforce_terminal_evidence(**outcomes)
 
     def test_terminal_cleanup_is_behavioral_and_nonrecursive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1795,28 +1900,39 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             self.assertNotIn("HF_TOKEN", output.read_text(encoding="utf-8"))
 
 class TerminalEvidenceEnvelopeContractTests(unittest.TestCase):
-    def test_job_envelope_reserves_governance_and_terminal_closure(self):
-        root = __import__("pathlib").Path(__file__).resolve().parents[1]
-        workflow = (root / ".github" / "workflows" / "hf-space-deploy.yml").read_text(encoding="utf-8")
-        self.assertIn("timeout-minutes: 90", workflow)
-        self.assertIn("job_timeout_seconds=5400", workflow)
+    def test_job_envelope_exports_one_absolute_deadline_with_explicit_slack(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "hf-space-deploy.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("timeout-minutes: 60", workflow)
+        self.assertIn("HF_TERMINAL_DEADLINE_EPOCH", workflow)
+        self.assertIn("$((started_at + 3300))", workflow)
+        self.assertIn("HF_TERMINAL_DEADLINE_EPOCH - 600", workflow)
         self.assertIn("max_pre_mutation_seconds=900", workflow)
-        self.assertIn("minimum_post_gate_seconds=4500", workflow)
-        self.assertIn('remaining="$((job_timeout_seconds - elapsed))"', workflow)
-        self.assertIn("remaining < minimum_post_gate_seconds", workflow)
+        self.assertIn("operation_remaining", workflow)
+        self.assertIn("operation_remaining < 1800", workflow)
+        self.assertIn("10m terminal-evidence, and 5m runner slack", workflow)
 
-    def test_failed_deployment_json_is_required_before_both_upload_attempts(self):
-        root = __import__("pathlib").Path(__file__).resolve().parents[1]
-        workflow = (root / ".github" / "workflows" / "hf-space-deploy.yml").read_text(encoding="utf-8")
-        self.assertIn("id: deployment-failure-json", workflow)
-        self.assertIn('test -s "$RUNNER_TEMP/hf-deploy-failure.json"', workflow)
-        self.assertEqual(workflow.count("steps.deployment-failure-json.outcome == 'success'"), 2)
-        preflight = workflow.index("id: deployment-failure-json")
+    def test_exact_failure_receipt_is_required_before_both_upload_attempts(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "hf-space-deploy.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("id: deployment-failure-receipt", workflow)
+        self.assertIn("validate-deployment-failure", workflow)
+        self.assertEqual(
+            workflow.count("steps.deployment-failure-receipt.outcome == 'success'"),
+            2,
+        )
+        self.assertIn("hf-space-deployment-failure-receipt-primary", workflow)
+        self.assertIn("hf-space-deployment-failure-receipt-retry", workflow)
+        self.assertIn("hf-space-deployment-failure-supporting", workflow)
+        preflight = workflow.index("id: deployment-failure-receipt")
         primary = workflow.index("id: deployment-failure-artifact-primary")
         retry = workflow.index("id: deployment-failure-artifact-retry")
         self.assertLess(preflight, primary)
         self.assertLess(primary, retry)
-
 
 if __name__ == "__main__":
     unittest.main()

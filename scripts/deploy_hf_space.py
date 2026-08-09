@@ -50,6 +50,8 @@ PUBLIC_INDEX_FIELDS = frozenset(
     }
 )
 GOVERNED_MAIN_STATUS = "AUTHORIZED_EXACT_PROTECTED_MAIN"
+TERMINAL_EVIDENCE_RESERVE_SECONDS = 600
+TERMINAL_DEADLINE_ENV = "HF_TERMINAL_DEADLINE_EPOCH"
 
 
 class TransientReadError(RuntimeError):
@@ -158,7 +160,10 @@ def _retry_transient(operation, *, deadline: float, label: str):
         if time.monotonic() >= deadline:
             raise RetryExhausted(f"{label} transient readback deadline expired")
         try:
-            return operation()
+            result = operation()
+            if time.monotonic() >= deadline:
+                raise RetryExhausted(f"{label} shared deadline expired")
+            return result
         except urllib.error.HTTPError as error:
             if error.code not in TRANSIENT_HTTP_STATUS:
                 raise
@@ -182,6 +187,37 @@ def _remaining_timeout(deadline: float, cap: float) -> float:
     return max(0.001, min(cap, remaining))
 
 
+def _workflow_terminal_deadline(*, required: bool = True) -> float | None:
+    raw_deadline = os.environ.get(TERMINAL_DEADLINE_ENV, "")
+    if not raw_deadline:
+        if required:
+            raise RuntimeError(f"{TERMINAL_DEADLINE_ENV} is required")
+        return None
+    if not raw_deadline.isdigit():
+        raise RuntimeError(f"{TERMINAL_DEADLINE_ENV} is malformed")
+    remaining = int(raw_deadline) - time.time()
+    if remaining <= 0:
+        raise RetryExhausted("shared terminal-evidence deadline expired")
+    return time.monotonic() + remaining
+
+
+def _workflow_operation_deadline() -> float:
+    terminal_deadline = _workflow_terminal_deadline()
+    assert terminal_deadline is not None
+    operation_deadline = terminal_deadline - TERMINAL_EVIDENCE_RESERVE_SECONDS
+    _remaining_timeout(operation_deadline, max(0.001, operation_deadline - time.monotonic()))
+    return operation_deadline
+
+
+def _require_workflow_terminal_budget() -> None:
+    terminal_deadline = _workflow_terminal_deadline(required=False)
+    if terminal_deadline is not None:
+        _remaining_timeout(
+            terminal_deadline,
+            max(0.001, terminal_deadline - time.monotonic()),
+        )
+
+
 def _request_json(url: str, token: str = "", timeout: float = 30) -> object:
     headers = {"Accept": "application/json", "User-Agent": UA}
     if token:
@@ -191,9 +227,19 @@ def _request_json(url: str, token: str = "", timeout: float = 30) -> object:
         return json.load(response)
 
 
-def _request_json_retry(url: str, *, deadline: float, label: str) -> object:
+def _request_json_retry(
+    url: str,
+    *,
+    deadline: float,
+    label: str,
+    token: str = "",
+) -> object:
     return _retry_transient(
-        lambda: _request_json(url, timeout=_remaining_timeout(deadline, 30)),
+        lambda: _request_json(
+            url,
+            token,
+            timeout=_remaining_timeout(deadline, 30),
+        ),
         deadline=deadline,
         label=label,
     )
@@ -322,7 +368,11 @@ def evaluate_effective_rulesets(
     return [GOVERNED_RULESET_ID], []
 
 
-def require_governed_main(source_sha: str) -> dict[str, object]:
+def require_governed_main(
+    source_sha: str,
+    *,
+    deadline: float | None = None,
+) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     source_ref = os.environ.get("GITHUB_REF", "")
@@ -337,14 +387,27 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
             "GOVERNANCE_TOKEN is required for protected-main reauthorization"
         )
 
-    metadata = _request_json(f"{api_root}/repos/{repository}", token)
+    if deadline is None:
+        deadline = time.monotonic() + 150
+
+    metadata = _request_json_retry(
+        f"{api_root}/repos/{repository}",
+        deadline=deadline,
+        label="repository identity readback",
+        token=token,
+    )
     if not isinstance(metadata, dict) or (
         metadata.get("id") != GOVERNED_REPOSITORY_ID
         or metadata.get("full_name") != SOURCE_REPO
         or metadata.get("default_branch") != "main"
     ):
         raise RuntimeError("repository identity/default branch is not exact")
-    branch = _request_json(f"{api_root}/repos/{repository}/branches/main", token)
+    branch = _request_json_retry(
+        f"{api_root}/repos/{repository}/branches/main",
+        deadline=deadline,
+        label="protected-main revision readback",
+        token=token,
+    )
     if not isinstance(branch, dict) or branch.get("protected") is not True:
         raise RuntimeError("repository main branch is not protected")
     live_sha = exact_sha(
@@ -356,16 +419,25 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
             f"refusing stale release: current main {live_sha} != source {source_sha}"
         )
 
-    summaries = _request_json(
-        f"{api_root}/repos/{repository}/rulesets?includes_parents=true", token
+    summaries = _request_json_retry(
+        f"{api_root}/repos/{repository}/rulesets?includes_parents=true",
+        deadline=deadline,
+        label="effective ruleset summary readback",
+        token=token,
     )
-    effective_rules = _request_json(
-        f"{api_root}/repos/{repository}/rules/branches/main", token
+    effective_rules = _request_json_retry(
+        f"{api_root}/repos/{repository}/rules/branches/main",
+        deadline=deadline,
+        label="effective branch-rule readback",
+        token=token,
     )
     details: dict[int, object] = {}
     try:
-        details[GOVERNED_RULESET_ID] = _request_json(
-            f"{api_root}/repos/{repository}/rulesets/{GOVERNED_RULESET_ID}", token
+        details[GOVERNED_RULESET_ID] = _request_json_retry(
+            f"{api_root}/repos/{repository}/rulesets/{GOVERNED_RULESET_ID}",
+            deadline=deadline,
+            label="governed ruleset detail readback",
+            token=token,
         )
     except Exception as error:
         details[GOVERNED_RULESET_ID] = {
@@ -609,6 +681,7 @@ def deploy_bundle(
     mutation_state: dict[str, object] | None = None,
     *,
     mutation_timeout: float = MUTATION_TIMEOUT_SECONDS,
+    deadline: float | None = None,
 ) -> dict[str, object]:
     if mutation_state is None:
         mutation_state = {}
@@ -621,10 +694,12 @@ def deploy_bundle(
     )
     source_sha = exact_sha(source_sha, "workflow source")
     manifest = validate_bundle(bundle, source_sha)
-    authorization = require_governed_main(source_sha)
+    if deadline is None:
+        deadline = time.monotonic() + mutation_timeout
+    authorization = require_governed_main(source_sha, deadline=deadline)
 
     child_environment = _hf_upload_child_environment()
-    mutation_deadline = time.monotonic() + mutation_timeout
+    mutation_deadline = min(deadline, time.monotonic() + mutation_timeout)
     before = _request_json_retry(
         f"https://huggingface.co/api/spaces/{HF_REPO}",
         deadline=mutation_deadline,
@@ -634,7 +709,7 @@ def deploy_bundle(
         raise RuntimeError("pre-mutation Hugging Face response is malformed")
     before_sha = exact_sha(before.get("sha"), "observed Hugging Face parent revision")
 
-    mutation_authorization = require_governed_main(source_sha)
+    mutation_authorization = require_governed_main(source_sha, deadline=deadline)
     if mutation_authorization != authorization:
         raise RuntimeError("protected-main authorization changed before publication")
     mutation_boundary = {
@@ -1214,6 +1289,7 @@ def attest_publication(
     attestation_path: Path,
     *,
     timeout: int = ATTEST_TIMEOUT_SECONDS,
+    deadline: float | None = None,
 ) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
     manifest = validate_bundle(bundle, source_sha)
@@ -1226,7 +1302,10 @@ def attest_publication(
         "deployment result previous revision",
     )
 
-    deadline = time.monotonic() + timeout
+    if deadline is None:
+        deadline = time.monotonic() + timeout
+    else:
+        _remaining_timeout(deadline, max(0.001, deadline - time.monotonic()))
     runtime_stage = _wait_for_exact_running(
         target_sha,
         previous_sha,
@@ -1283,7 +1362,7 @@ def attest_publication(
         source_sha,
     )
 
-    post_publication_main = require_governed_main(source_sha)
+    post_publication_main = require_governed_main(source_sha, deadline=deadline)
 
     attestation = {
         "schema": "szl.hf-live-attestation/v2",
@@ -1386,6 +1465,82 @@ def write_failure_evidence(
             }
         )
     )
+
+
+def validate_deployment_failure_receipt(
+    path: Path,
+    source_sha: str,
+) -> dict[str, object]:
+    source_sha = exact_sha(source_sha, "workflow source")
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise RuntimeError("required failed-deployment receipt is missing or unreadable") from error
+    if not payload:
+        raise RuntimeError("required failed-deployment receipt is empty")
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("required failed-deployment receipt is malformed JSON") from error
+    required_fields = {
+        "schema",
+        "status",
+        "receipt_minted",
+        "measured",
+        "deployment_success",
+        "upload_call_entered",
+        "authoritative_readback_attempted",
+        "source_repository",
+        "source_revision",
+        "source_relation",
+        "hf_revision",
+        "error_type",
+        "error",
+        "target",
+    }
+    if not isinstance(value, dict) or set(value) != required_fields:
+        raise RuntimeError("required failed-deployment receipt fields are not exact")
+    if payload != canonical_json(value):
+        raise RuntimeError("required failed-deployment receipt is not canonical JSON")
+    if value.get("schema") != "szl.hf-deploy-failure/v2":
+        raise RuntimeError("required failed-deployment receipt schema is not exact")
+    if value.get("status") not in {
+        "FAILED_BEFORE_MUTATION",
+        "MUTATION_OUTCOME_UNKNOWN",
+        "PARTIAL_AFTER_MUTATION",
+    }:
+        raise RuntimeError("required failed-deployment receipt status is invalid")
+    if any(value.get(field) is not False for field in ("receipt_minted", "measured", "deployment_success")):
+        raise RuntimeError("required failed-deployment receipt contains a success contradiction")
+    if not isinstance(value.get("upload_call_entered"), bool) or not isinstance(
+        value.get("authoritative_readback_attempted"), bool
+    ):
+        raise RuntimeError("required failed-deployment receipt booleans are invalid")
+    if (
+        value.get("source_repository") != SOURCE_REPO
+        or value.get("source_revision") != source_sha
+        or value.get("source_relation") != SOURCE_RELATION
+        or value.get("target") != HF_REPO
+    ):
+        raise RuntimeError("required failed-deployment receipt provenance is not exact")
+    revision = value.get("hf_revision")
+    if revision is not None and not (
+        isinstance(revision, str) and HEX40.fullmatch(revision)
+    ):
+        raise RuntimeError("required failed-deployment receipt revision is invalid")
+    if value["status"] == "PARTIAL_AFTER_MUTATION" and revision is None:
+        raise RuntimeError("partial failed-deployment receipt lacks its revision")
+    if value["status"] != "PARTIAL_AFTER_MUTATION" and revision is not None:
+        raise RuntimeError("failed-deployment receipt revision contradicts its status")
+    if value["status"] == "FAILED_BEFORE_MUTATION" and value["upload_call_entered"]:
+        raise RuntimeError("failed-before-mutation receipt contradicts its mutation marker")
+    if value["status"] == "MUTATION_OUTCOME_UNKNOWN" and not value["upload_call_entered"]:
+        raise RuntimeError("unknown mutation receipt lacks its mutation marker")
+    if not isinstance(value.get("error_type"), str) or not value["error_type"]:
+        raise RuntimeError("required failed-deployment receipt error type is invalid")
+    if not isinstance(value.get("error"), str) or not value["error"] or len(value["error"]) > 1000:
+        raise RuntimeError("required failed-deployment receipt error is invalid")
+    return value
 
 
 def write_workflow_stage_failure(
@@ -1780,13 +1935,20 @@ def require_receipt_failure_artifact(
 
 def require_deployment_failure_artifact(
     required: bool,
+    receipt_outcome: str,
     primary_outcome: str,
     retry_outcome: str,
 ) -> None:
     if not required:
         return
-    if primary_outcome not in STEP_OUTCOMES or retry_outcome not in STEP_OUTCOMES:
+    if (
+        receipt_outcome not in STEP_OUTCOMES
+        or primary_outcome not in STEP_OUTCOMES
+        or retry_outcome not in STEP_OUTCOMES
+    ):
         raise RuntimeError("failed-deployment artifact outcome is malformed")
+    if receipt_outcome != "success":
+        raise RuntimeError("required failed-deployment receipt validation did not succeed")
     if primary_outcome != "success" and retry_outcome != "success":
         raise RuntimeError("failed-deployment evidence was not preserved")
 
@@ -1802,6 +1964,7 @@ def enforce_terminal_evidence(
     failure_synthesis_outcome: str,
     failure_artifact_primary_outcome: str,
     failure_artifact_retry_outcome: str,
+    deployment_failure_receipt_outcome: str = "skipped",
     deployment_failure_artifact_primary_outcome: str,
     deployment_failure_artifact_retry_outcome: str,
 ) -> dict[str, object]:
@@ -1818,6 +1981,7 @@ def enforce_terminal_evidence(
         "failure_synthesis": failure_synthesis_outcome,
         "failure_artifact_primary": failure_artifact_primary_outcome,
         "failure_artifact_retry": failure_artifact_retry_outcome,
+        "deployment_failure_receipt": deployment_failure_receipt_outcome,
         "deployment_failure_artifact_primary": deployment_failure_artifact_primary_outcome,
         "deployment_failure_artifact_retry": deployment_failure_artifact_retry_outcome,
     }
@@ -1837,6 +2001,7 @@ def enforce_terminal_evidence(
     )
     require_deployment_failure_artifact(
         publish_outcome == "failure",
+        deployment_failure_receipt_outcome,
         deployment_failure_artifact_primary_outcome,
         deployment_failure_artifact_retry_outcome,
     )
@@ -1858,6 +2023,7 @@ def cleanup_terminal_success_files(paths: list[Path]) -> bool:
 
 
 def stage_failure_main(argv: list[str]) -> int:
+    _require_workflow_terminal_budget()
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--result", type=Path, required=True)
@@ -1890,6 +2056,7 @@ def stage_failure_main(argv: list[str]) -> int:
 
 
 def candidate_receipt_main(argv: list[str]) -> int:
+    _require_workflow_terminal_budget()
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--bundle", type=Path, required=True)
@@ -1909,6 +2076,7 @@ def candidate_receipt_main(argv: list[str]) -> int:
 
 
 def finalize_receipt_main(argv: list[str]) -> int:
+    _require_workflow_terminal_budget()
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--bundle", type=Path, required=True)
@@ -1938,6 +2106,7 @@ def finalize_receipt_main(argv: list[str]) -> int:
 
 
 def enforce_terminal_main(argv: list[str]) -> int:
+    _require_workflow_terminal_budget()
     parser = argparse.ArgumentParser()
     parser.add_argument("--publish-outcome", required=True)
     parser.add_argument("--artifact-outcome", required=True)
@@ -1948,11 +2117,26 @@ def enforce_terminal_main(argv: list[str]) -> int:
     parser.add_argument("--failure-synthesis-outcome", required=True)
     parser.add_argument("--failure-artifact-primary-outcome", required=True)
     parser.add_argument("--failure-artifact-retry-outcome", required=True)
+    parser.add_argument("--deployment-failure-receipt-outcome", required=True)
     parser.add_argument("--deployment-failure-artifact-primary-outcome", required=True)
     parser.add_argument("--deployment-failure-artifact-retry-outcome", required=True)
     args = parser.parse_args(argv)
     result = enforce_terminal_evidence(**vars(args))
     print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def validate_deployment_failure_main(argv: list[str]) -> int:
+    _require_workflow_terminal_budget()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--failure-evidence", type=Path, required=True)
+    args = parser.parse_args(argv)
+    receipt = validate_deployment_failure_receipt(
+        args.failure_evidence,
+        args.source_sha,
+    )
+    print(json.dumps(receipt, sort_keys=True))
     return 0
 
 
@@ -1967,6 +2151,8 @@ def main() -> int:
         return finalize_receipt_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "enforce-terminal":
         return enforce_terminal_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "validate-deployment-failure":
+        return validate_deployment_failure_main(sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
@@ -1975,14 +2161,22 @@ def main() -> int:
     parser.add_argument("--failure-evidence", type=Path, required=True)
     args = parser.parse_args()
     source_sha = exact_sha(args.source_sha, "workflow source")
+    operation_deadline = _workflow_operation_deadline()
     mutation_state: dict[str, object] = {}
     try:
-        deploy_bundle(args.bundle, source_sha, args.result, mutation_state)
+        deploy_bundle(
+            args.bundle,
+            source_sha,
+            args.result,
+            mutation_state,
+            deadline=operation_deadline,
+        )
         attestation = attest_publication(
             args.bundle,
             source_sha,
             args.result,
             args.attestation,
+            deadline=operation_deadline,
         )
     except Exception as error:
         write_failure_evidence(
