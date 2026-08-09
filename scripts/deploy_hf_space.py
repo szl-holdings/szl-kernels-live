@@ -431,6 +431,19 @@ def deploy_bundle(
     mutation_authorization = require_governed_main(source_sha)
     if mutation_authorization != authorization:
         raise RuntimeError("protected-main authorization changed before publication")
+    mutation_boundary = {
+        "schema": "szl.hf-deploy-result/v1",
+        "status": "MUTATION_BOUNDARY_CROSSED",
+        "source_revision": source_sha,
+        "previous_hf_revision": before_sha,
+        "hf_revision": None,
+        "bundle_sha256": manifest["bundle_sha256"],
+        "target": HF_REPO,
+        "authorization": mutation_authorization,
+    }
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    with result_path.open("xb") as handle:
+        handle.write(canonical_json(mutation_boundary))
     mutation_state["upload_call_entered"] = True
     try:
         commit = api.upload_folder(
@@ -446,6 +459,7 @@ def deploy_bundle(
                 f"Bundle: {manifest['bundle_sha256']}"
             ),
         )
+        target_sha = exact_sha(commit.oid, "published Hugging Face revision")
     except Exception:
         mutation_state["authoritative_readback_attempted"] = True
         try:
@@ -459,7 +473,6 @@ def deploy_bundle(
             recovered = None
         mutation_state["known_hf_revision"] = recovered
         raise
-    target_sha = exact_sha(commit.oid, "published Hugging Face revision")
     mutation_state["known_hf_revision"] = target_sha
     result = {
         "schema": "szl.hf-deploy-result/v1",
@@ -482,16 +495,110 @@ def _origin(url: str) -> str:
     return f"https://{parsed.netloc.lower()}"
 
 
+def _hf_resolve_cache_url_is_valid(
+    parsed: urllib.parse.SplitResult,
+    *,
+    expected_path: str,
+) -> bool:
+    if parsed.scheme != "https" or parsed.netloc.lower() != "huggingface.co":
+        return False
+    if "/resolve/" not in expected_path or not expected_path.startswith("/spaces/"):
+        return False
+    expected_cache_path = "/api/resolve-cache" + expected_path.replace(
+        "/resolve/", "/", 1
+    )
+    if parsed.path != expected_cache_path:
+        return False
+    try:
+        pairs = urllib.parse.parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except ValueError:
+        return False
+    if len(pairs) != 2 or len({key for key, _ in pairs}) != 2:
+        return False
+    values = dict(pairs)
+    etag = values.get("etag")
+    return (
+        values.get(expected_path) == ""
+        and isinstance(etag, str)
+        and re.fullmatch(r'"(?:[0-9a-f]{40}|[0-9a-f]{64})"', etag) is not None
+    )
+
+
+def _signed_hf_cdn_url_is_valid(parsed: urllib.parse.SplitResult) -> bool:
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return False
+    try:
+        if parsed.port not in {None, 443}:
+            return False
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    if not (
+        host == "cdn-lfs.hf.co"
+        or re.fullmatch(r"cdn-lfs-[a-z0-9-]+\.hf\.co", host)
+        or host == "cas-bridge.xethub.hf.co"
+    ):
+        return False
+    if not parsed.path or parsed.path == "/":
+        return False
+    try:
+        pairs = urllib.parse.parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except ValueError:
+        return False
+    if not pairs or len(pairs) != len({key for key, _ in pairs}):
+        return False
+    keys = {key for key, _ in pairs}
+    cloudfront_canned = {"Expires", "Signature", "Key-Pair-Id"}
+    cloudfront_custom = {"Policy", "Signature", "Key-Pair-Id"}
+    aws_v4 = {
+        "X-Amz-Algorithm",
+        "X-Amz-Credential",
+        "X-Amz-Date",
+        "X-Amz-Expires",
+        "X-Amz-SignedHeaders",
+        "X-Amz-Signature",
+    }
+    xet = {"X-Xet-Cas-Uid", "X-Xet-Cas-Token", "X-Xet-Cas-Url"}
+    return (
+        cloudfront_canned <= keys
+        or cloudfront_custom <= keys
+        or aws_v4 <= keys
+        or xet <= keys
+    )
+
+
 def _validate_readback_url(
     url: str,
     *,
     allowed_origins: frozenset[str],
     expected_path: str,
     expected_query: str,
+    allow_hf_resolve_redirects: bool = False,
+    redirect_step: int = 0,
 ) -> None:
     parsed = urllib.parse.urlsplit(url)
     if parsed.fragment:
         raise RuntimeError("public readback redirect added a fragment")
+    if (
+        _origin(url) in allowed_origins
+        and parsed.path == expected_path
+        and parsed.query == expected_query
+    ):
+        return
+    if allow_hf_resolve_redirects and redirect_step > 0:
+        if _hf_resolve_cache_url_is_valid(parsed, expected_path=expected_path):
+            return
+        if _signed_hf_cdn_url_is_valid(parsed):
+            return
+        raise RuntimeError("public readback used an unapproved immutable HF redirect")
     if _origin(url) not in allowed_origins:
         raise RuntimeError("public readback redirect changed to an unapproved origin")
     if parsed.path != expected_path:
@@ -507,6 +614,7 @@ def _public_bytes_once(
     expected_path: str,
     expected_query: str,
     max_redirects: int,
+    allow_hf_resolve_redirects: bool = False,
     timeout: float = 45,
 ) -> tuple[int, bytes, str, int]:
     opener = urllib.request.build_opener(_NoRedirects())
@@ -518,6 +626,8 @@ def _public_bytes_once(
             allowed_origins=allowed_origins,
             expected_path=expected_path,
             expected_query=expected_query,
+            allow_hf_resolve_redirects=allow_hf_resolve_redirects,
+            redirect_step=redirects,
         )
         request = urllib.request.Request(current, headers={"User-Agent": UA})
         try:
@@ -531,6 +641,8 @@ def _public_bytes_once(
                     allowed_origins=allowed_origins,
                     expected_path=expected_path,
                     expected_query=expected_query,
+                    allow_hf_resolve_redirects=allow_hf_resolve_redirects,
+                    redirect_step=redirects,
                 )
                 return status, response.read(), final_url, redirects
         except urllib.error.HTTPError as error:
@@ -557,6 +669,7 @@ def _public_bytes(
     expected_path: str,
     expected_query: str,
     max_redirects: int,
+    allow_hf_resolve_redirects: bool = False,
 ) -> tuple[int, bytes, str, int]:
     return _retry_transient(
         lambda: _public_bytes_once(
@@ -565,6 +678,7 @@ def _public_bytes(
             expected_path=expected_path,
             expected_query=expected_query,
             max_redirects=max_redirects,
+            allow_hf_resolve_redirects=allow_hf_resolve_redirects,
             timeout=_remaining_timeout(deadline, 45),
         ),
         deadline=deadline,
@@ -654,18 +768,27 @@ def _fetch_public_index(
         expected_path="/index.html",
         expected_query=query,
     )
-    terminal_status, terminal_body, second_location = _public_response(
-        terminal_url,
+    def read_terminal() -> tuple[int, bytes, str | None]:
+        response = _public_response(
+            terminal_url,
+            deadline=deadline,
+            label="public index terminal readback",
+            allowed_origins=frozenset({origin}),
+            expected_path="/index.html",
+            expected_query=query,
+        )
+        if response[0] != 200 or response[2] is not None:
+            raise RuntimeError(
+                "public index must terminate at one redirect with status 200"
+            )
+        return response
+
+    _, terminal_body, _ = _retry_exact_read(
+        read_terminal,
+        lambda response: response[1] == expected_bytes,
         deadline=deadline,
-        label="public index terminal readback",
-        allowed_origins=frozenset({origin}),
-        expected_path="/index.html",
-        expected_query=query,
+        mismatch_message="public index bytes differ from the bundled index",
     )
-    if terminal_status != 200 or second_location is not None:
-        raise RuntimeError("public index must terminate at one redirect with status 200")
-    if terminal_body != expected_bytes:
-        raise RuntimeError("public index bytes differ from the bundled index")
     return terminal_body
 
 
@@ -675,8 +798,14 @@ def _static_origin() -> str:
     return f"https://{slug}.static.hf.space"
 
 
-def _wait_for_exact_running(target_sha: str, *, deadline: float) -> str:
+def _wait_for_exact_running(
+    target_sha: str,
+    previous_sha: str,
+    *,
+    deadline: float,
+) -> str:
     target_sha = exact_sha(target_sha, "target Hugging Face revision")
+    previous_sha = exact_sha(previous_sha, "previous Hugging Face revision")
     last_stage: object = None
     last_revision: str | None = None
     while True:
@@ -695,6 +824,11 @@ def _wait_for_exact_running(target_sha: str, *, deadline: float) -> str:
         last_revision = exact_sha(info.get("sha"), "runtime Hugging Face revision")
         last_stage = info["runtime"].get("stage")
         if last_revision != target_sha:
+            if last_revision != previous_sha:
+                raise RuntimeError(
+                    "Space runtime advanced to an unrelated revision: "
+                    f"{last_revision}"
+                )
             time.sleep(min(10, max(0.0, deadline - time.monotonic())))
             continue
         if last_stage == "RUNNING":
@@ -704,6 +838,23 @@ def _wait_for_exact_running(target_sha: str, *, deadline: float) -> str:
         if last_stage not in PENDING_STAGES:
             raise RuntimeError(f"Space runtime stage is unsupported: {last_stage!r}")
         time.sleep(min(10, max(0.0, deadline - time.monotonic())))
+
+
+def _retry_exact_read(
+    read_once,
+    matches,
+    *,
+    deadline: float,
+    mismatch_message: str,
+):
+    while True:
+        observed = read_once()
+        if matches(observed):
+            return observed
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(mismatch_message)
+        time.sleep(min(2, remaining))
 
 
 def _verify_exact_hf_revision(
@@ -759,22 +910,34 @@ def _verify_exact_hf_revision(
             f"{urllib.parse.quote(relative, safe='/')}"
         )
         parsed = urllib.parse.urlsplit(url)
-        status, data, _, _ = _public_bytes(
-            url,
-            deadline=deadline,
-            label=f"exact-tree file {relative}",
-            allowed_origins=frozenset({"https://huggingface.co"}),
-            expected_path=parsed.path,
-            expected_query=parsed.query,
-            max_redirects=0,
-        )
         row = expected[relative]
-        if (
-            status != 200
-            or len(data) != row["bytes"]
-            or hashlib.sha256(data).hexdigest() != row["sha256"]
-        ):
-            raise RuntimeError(f"public live bytes differ: {relative}")
+
+        def read_file() -> tuple[int, bytes, str, int]:
+            response = _public_bytes(
+                url,
+                deadline=deadline,
+                label=f"exact-tree file {relative}",
+                allowed_origins=frozenset({"https://huggingface.co"}),
+                expected_path=parsed.path,
+                expected_query=parsed.query,
+                max_redirects=3,
+                allow_hf_resolve_redirects=True,
+            )
+            if response[0] != 200:
+                raise RuntimeError(
+                    f"public live file returned HTTP {response[0]}: {relative}"
+                )
+            return response
+
+        _, data, _, _ = _retry_exact_read(
+            read_file,
+            lambda response: (
+                len(response[1]) == row["bytes"]
+                and hashlib.sha256(response[1]).hexdigest() == row["sha256"]
+            ),
+            deadline=deadline,
+            mismatch_message=f"public live bytes differ: {relative}",
+        )
         verified_tree.append(
             {
                 "path": relative,
@@ -816,9 +979,17 @@ def attest_publication(
     if result.get("source_revision") != source_sha or result.get("target") != HF_REPO:
         raise RuntimeError("deployment result is not bound to this source and target")
     target_sha = exact_sha(result.get("hf_revision"), "deployment result revision")
+    previous_sha = exact_sha(
+        result.get("previous_hf_revision"),
+        "deployment result previous revision",
+    )
 
     deadline = time.monotonic() + timeout
-    runtime_stage = _wait_for_exact_running(target_sha, deadline=deadline)
+    runtime_stage = _wait_for_exact_running(
+        target_sha,
+        previous_sha,
+        deadline=deadline,
+    )
     verified_tree = _verify_exact_hf_revision(
         bundle,
         manifest,
@@ -844,20 +1015,27 @@ def attest_publication(
     if bundled_provenance_bytes != canonical_provenance_bytes:
         raise RuntimeError("bundled provenance is not canonical JSON")
     provenance_url = origin + "/SPACE_PROVENANCE.json?" + query
-    provenance_status, provenance_body, provenance_location = _public_response(
-        provenance_url,
+    def read_provenance() -> tuple[int, bytes, str | None]:
+        response = _public_response(
+            provenance_url,
+            deadline=deadline,
+            label="public provenance readback",
+            allowed_origins=frozenset({origin}),
+            expected_path="/SPACE_PROVENANCE.json",
+            expected_query=query,
+        )
+        if response[0] != 200 or response[2] is not None:
+            raise RuntimeError(
+                "public provenance must terminate without redirect at status 200"
+            )
+        return response
+
+    _, provenance_body, _ = _retry_exact_read(
+        read_provenance,
+        lambda response: response[1] == canonical_provenance_bytes,
         deadline=deadline,
-        label="public provenance readback",
-        allowed_origins=frozenset({origin}),
-        expected_path="/SPACE_PROVENANCE.json",
-        expected_query=query,
+        mismatch_message="public provenance bytes differ from the canonical bundle",
     )
-    if (
-        provenance_status != 200
-        or provenance_location is not None
-        or provenance_body != canonical_provenance_bytes
-    ):
-        raise RuntimeError("public provenance bytes differ from the canonical bundle")
     provenance = validate_public_provenance(
         json.loads(provenance_body),
         source_sha,
@@ -912,13 +1090,28 @@ def write_failure_evidence(
     )
     if not (isinstance(published_revision, str) and HEX40.fullmatch(published_revision)):
         published_revision = None
-    if mutation_state is None and result_path.is_file():
+    if result_path.is_file():
         try:
-            candidate = json.loads(result_path.read_text(encoding="utf-8")).get(
-                "hf_revision"
-            )
-            if isinstance(candidate, str) and HEX40.fullmatch(candidate):
-                published_revision = candidate
+            persisted = json.loads(result_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(persisted, dict)
+                and persisted.get("schema") == "szl.hf-deploy-result/v1"
+                and persisted.get("source_revision") == source_sha
+                and persisted.get("target") == HF_REPO
+            ):
+                candidate = persisted.get("hf_revision")
+                if isinstance(candidate, str) and HEX40.fullmatch(candidate):
+                    published_revision = candidate
+                    upload_call_entered = True
+                elif (
+                    persisted.get("status") == "MUTATION_BOUNDARY_CROSSED"
+                    and candidate is None
+                    and isinstance(persisted.get("previous_hf_revision"), str)
+                    and HEX40.fullmatch(persisted["previous_hf_revision"])
+                    and isinstance(persisted.get("bundle_sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", persisted["bundle_sha256"])
+                ):
+                    upload_call_entered = True
         except (OSError, json.JSONDecodeError):
             pass
     if published_revision:

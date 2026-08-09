@@ -24,6 +24,7 @@ from scripts.deploy_hf_space import (
     _public_bytes,
     _request_json_retry,
     _static_origin,
+    _validate_readback_url,
     _wait_for_exact_running,
     attest_publication,
     canonical_json,
@@ -503,6 +504,8 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         def public_bytes(url: str, **_kwargs) -> tuple[int, bytes, str, int]:
             if "/resolve/" not in url:
                 raise AssertionError(url)
+            self.assertTrue(_kwargs.get("allow_hf_resolve_redirects"))
+            self.assertEqual(_kwargs.get("max_redirects"), 3)
             marker = f"/resolve/{target_sha}/"
             relative = urllib.parse.unquote(url.split(marker, 1)[1])
             return 200, (bundle / relative).read_bytes(), url, 0
@@ -535,6 +538,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     {
                         "source_revision": SOURCE_SHA,
                         "target": HF_REPO,
+                        "previous_hf_revision": PARENT_SHA,
                         "hf_revision": TARGET_SHA,
                     }
                 )
@@ -556,18 +560,40 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "source_revision": SOURCE_SHA,
                 "ruleset_ids": [GOVERNED_RULESET_ID],
             }
+            immutable_attempts: dict[str, int] = {}
+
+            def eventual_public_bytes(url: str, **kwargs):
+                response = public_bytes(url, **kwargs)
+                immutable_attempts[url] = immutable_attempts.get(url, 0) + 1
+                if immutable_attempts[url] == 1:
+                    return response[0], b"propagating", response[2], response[3]
+                return response
+
+            provenance_attempts = 0
+
+            def eventual_public_response(url: str, **kwargs):
+                nonlocal provenance_attempts
+                response = public_response(url, **kwargs)
+                if urllib.parse.urlsplit(url).path == "/SPACE_PROVENANCE.json":
+                    provenance_attempts += 1
+                    if provenance_attempts == 1:
+                        return response[0], b"propagating", response[2]
+                return response
+
             with mock.patch(
                 "scripts.deploy_hf_space._request_json_retry",
                 side_effect=hf_json,
             ), mock.patch(
                 "scripts.deploy_hf_space._public_bytes",
-                side_effect=public_bytes,
+                side_effect=eventual_public_bytes,
             ), mock.patch(
                 "scripts.deploy_hf_space._public_response",
-                side_effect=public_response,
+                side_effect=eventual_public_response,
             ), mock.patch(
                 "scripts.deploy_hf_space.require_governed_main",
                 return_value=final_guard,
+            ), mock.patch(
+                "scripts.deploy_hf_space.time.sleep"
             ):
                 evidence = attest_publication(
                     bundle,
@@ -609,6 +635,8 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 json.loads(attestation.read_text(encoding="utf-8")), evidence
             )
             self.assertEqual(attestation.read_bytes(), canonical_json(evidence))
+            self.assertGreaterEqual(min(immutable_attempts.values()), 2)
+            self.assertEqual(provenance_attempts, 2)
 
             invalid_sources = (
                 ("missing repository", "repository", None),
@@ -628,6 +656,45 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     ):
                         validate_public_provenance(candidate, SOURCE_SHA)
 
+    def test_public_provenance_rejects_terminal_nonmatching_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "bundle"
+            build_bundle(bundle, SOURCE_SHA)
+            result = Path(temporary) / "result.json"
+            result.write_bytes(
+                canonical_json(
+                    {
+                        "source_revision": SOURCE_SHA,
+                        "target": HF_REPO,
+                        "previous_hf_revision": PARENT_SHA,
+                        "hf_revision": TARGET_SHA,
+                    }
+                )
+            )
+            with mock.patch(
+                "scripts.deploy_hf_space._wait_for_exact_running",
+                return_value="RUNNING",
+            ), mock.patch(
+                "scripts.deploy_hf_space._verify_exact_hf_revision",
+                return_value=[],
+            ), mock.patch(
+                "scripts.deploy_hf_space._fetch_public_index",
+                return_value=(bundle / "index.html").read_bytes(),
+            ), mock.patch(
+                "scripts.deploy_hf_space._public_response",
+                return_value=(200, b"terminal mismatch", None),
+            ), mock.patch(
+                "scripts.deploy_hf_space.time.monotonic",
+                side_effect=(0.0, 1.0),
+            ), self.assertRaisesRegex(RuntimeError, "provenance bytes differ"):
+                attest_publication(
+                    bundle,
+                    SOURCE_SHA,
+                    result,
+                    Path(temporary) / "attestation.json",
+                    timeout=1,
+                )
+
     def test_public_root_requires_one_exact_302_then_terminal_200_bytes(self) -> None:
         origin = _static_origin()
         query = urllib.parse.urlencode({"source": SOURCE_SHA})
@@ -638,8 +705,11 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             "scripts.deploy_hf_space._public_response",
             side_effect=[
                 (302, b"", exact_location),
+                (200, b"propagating", None),
                 (200, expected, None),
             ],
+        ), mock.patch(
+            "scripts.deploy_hf_space.time.sleep"
         ):
             self.assertEqual(
                 _fetch_public_index(
@@ -673,11 +743,6 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 [(302, b"", exact_location), (302, b"", exact_location)],
                 "terminate at one redirect",
             ),
-            (
-                "wrong bytes",
-                [(302, b"", exact_location), (200, b"wrong", None)],
-                "bytes differ",
-            ),
         )
         for label, responses, message in failures:
             with self.subTest(label=label), mock.patch(
@@ -690,6 +755,23 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     expected,
                     deadline=float("inf"),
                 )
+
+        with mock.patch(
+            "scripts.deploy_hf_space._public_response",
+            side_effect=[
+                (302, b"", exact_location),
+                (200, b"wrong", None),
+            ],
+        ), mock.patch(
+            "scripts.deploy_hf_space.time.monotonic",
+            return_value=1.0,
+        ), self.assertRaisesRegex(RuntimeError, "bytes differ"):
+            _fetch_public_index(
+                origin,
+                SOURCE_SHA,
+                expected,
+                deadline=0.5,
+            )
 
     def test_transient_reads_are_bounded_and_all_5xx_retry(self) -> None:
         origin = _static_origin()
@@ -744,6 +826,66 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             )
         self.assertLessEqual(request_json.call_args.kwargs["timeout"], 5.0)
 
+    def test_immutable_hf_redirects_are_constrained(self) -> None:
+        expected_path = f"/spaces/{HF_REPO}/resolve/{TARGET_SHA}/index.html"
+        cache_path = (
+            f"/api/resolve-cache/spaces/{HF_REPO}/{TARGET_SHA}/index.html"
+        )
+        cache_query = urllib.parse.urlencode(
+            [(expected_path, ""), ("etag", '"' + "d" * 64 + '"')]
+        )
+        _validate_readback_url(
+            "https://huggingface.co" + cache_path + "?" + cache_query,
+            allowed_origins=frozenset({"https://huggingface.co"}),
+            expected_path=expected_path,
+            expected_query="",
+            allow_hf_resolve_redirects=True,
+            redirect_step=1,
+        )
+        _validate_readback_url(
+            (
+                "https://cdn-lfs.hf.co/repos/object?Expires=1&"
+                "Signature=s&Key-Pair-Id=k"
+            ),
+            allowed_origins=frozenset({"https://huggingface.co"}),
+            expected_path=expected_path,
+            expected_query="",
+            allow_hf_resolve_redirects=True,
+            redirect_step=2,
+        )
+        _validate_readback_url(
+            (
+                "https://cdn-lfs-us-1.hf.co/repos/object?Policy=p&"
+                "Signature=s&Key-Pair-Id=k"
+            ),
+            allowed_origins=frozenset({"https://huggingface.co"}),
+            expected_path=expected_path,
+            expected_query="",
+            allow_hf_resolve_redirects=True,
+            redirect_step=2,
+        )
+
+        rejected = (
+            "https://huggingface.co"
+            + cache_path.replace(TARGET_SHA, PARENT_SHA)
+            + "?"
+            + cache_query,
+            "https://cdn-lfs.hf.co/repos/object",
+            "https://example.test/object?Signature=s",
+        )
+        for url in rejected:
+            with self.subTest(url=url), self.assertRaisesRegex(
+                RuntimeError, "unapproved immutable HF redirect"
+            ):
+                _validate_readback_url(
+                    url,
+                    allowed_origins=frozenset({"https://huggingface.co"}),
+                    expected_path=expected_path,
+                    expected_query="",
+                    allow_hf_resolve_redirects=True,
+                    redirect_step=1,
+                )
+
     def test_prior_runtime_revision_is_retried_as_propagation(self) -> None:
         with mock.patch(
             "scripts.deploy_hf_space._request_json_retry",
@@ -757,9 +899,30 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             "scripts.deploy_hf_space.time.sleep"
         ):
             self.assertEqual(
-                _wait_for_exact_running(TARGET_SHA, deadline=10.0), "RUNNING"
+                _wait_for_exact_running(
+                    TARGET_SHA,
+                    PARENT_SHA,
+                    deadline=10.0,
+                ),
+                "RUNNING",
             )
         self.assertEqual(request_json.call_count, 2)
+
+        unrelated = "d" * 40
+        with mock.patch(
+            "scripts.deploy_hf_space._request_json_retry",
+            return_value={"sha": unrelated, "runtime": {"stage": "RUNNING"}},
+        ), mock.patch(
+            "scripts.deploy_hf_space.time.monotonic", return_value=0.0
+        ), mock.patch(
+            "scripts.deploy_hf_space.time.sleep"
+        ) as sleep, self.assertRaisesRegex(RuntimeError, "unrelated revision"):
+            _wait_for_exact_running(
+                TARGET_SHA,
+                PARENT_SHA,
+                deadline=10.0,
+            )
+        sleep.assert_not_called()
 
     def test_same_sha_governance_weakening_writes_partial_not_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -771,6 +934,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     {
                         "source_revision": SOURCE_SHA,
                         "target": HF_REPO,
+                        "previous_hf_revision": PARENT_SHA,
                         "hf_revision": TARGET_SHA,
                     }
                 )
@@ -848,6 +1012,10 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             upload = api.upload_folder.call_args.kwargs
             self.assertEqual(upload["parent_commit"], PARENT_SHA)
             self.assertEqual(upload["delete_patterns"], "*")
+            boundary = json.loads(result.read_text(encoding="utf-8"))
+            self.assertEqual(boundary["status"], "MUTATION_BOUNDARY_CROSSED")
+            self.assertEqual(boundary["previous_hf_revision"], PARENT_SHA)
+            self.assertIsNone(boundary["hf_revision"])
 
             failure = Path(temporary) / "unknown.json"
             write_failure_evidence(
@@ -857,18 +1025,36 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             self.assertEqual(unknown["status"], "MUTATION_OUTCOME_UNKNOWN")
             self.assertIsNone(unknown["hf_revision"])
 
+            durable_failure = Path(temporary) / "durable-unknown.json"
+            write_failure_evidence(
+                durable_failure,
+                SOURCE_SHA,
+                TimeoutError("process restarted"),
+                result,
+                None,
+            )
+            durable = json.loads(durable_failure.read_text(encoding="utf-8"))
+            self.assertEqual(durable["status"], "MUTATION_OUTCOME_UNKNOWN")
+            self.assertTrue(durable["upload_call_entered"])
+
             precondition_state: dict[str, object] = {}
+            precondition_result = Path(temporary) / "precondition-result.json"
             with mock.patch(
                 "scripts.deploy_hf_space.require_governed_main",
                 side_effect=RuntimeError("governance unavailable"),
             ), self.assertRaises(RuntimeError):
-                deploy_bundle(bundle, SOURCE_SHA, result, precondition_state)
+                deploy_bundle(
+                    bundle,
+                    SOURCE_SHA,
+                    precondition_result,
+                    precondition_state,
+                )
             before = Path(temporary) / "before.json"
             write_failure_evidence(
                 before,
                 SOURCE_SHA,
                 RuntimeError("governance unavailable"),
-                result,
+                precondition_result,
                 precondition_state,
             )
             self.assertEqual(
