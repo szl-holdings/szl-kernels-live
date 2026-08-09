@@ -1800,22 +1800,64 @@ class TerminalEvidenceEnvelopeContractTests(unittest.TestCase):
         workflow = (root / ".github" / "workflows" / "hf-space-deploy.yml").read_text(encoding="utf-8")
         self.assertIn("timeout-minutes: 90", workflow)
         self.assertIn("job_timeout_seconds=5400", workflow)
+        self.assertIn("runner_shutdown_slack_seconds=300", workflow)
         self.assertIn("max_pre_mutation_seconds=900", workflow)
-        self.assertIn("minimum_post_gate_seconds=4500", workflow)
-        self.assertIn('remaining="$((job_timeout_seconds - elapsed))"', workflow)
+        self.assertIn("minimum_post_gate_seconds=4200", workflow)
+        self.assertIn("HF_TERMINAL_DEADLINE_EPOCH", workflow)
+        self.assertIn('terminal_deadline_epoch="$((HF_JOB_STARTED_AT_EPOCH + job_timeout_seconds - runner_shutdown_slack_seconds))"', workflow)
+        self.assertIn('remaining="$((terminal_deadline_epoch - now))"', workflow)
         self.assertIn("remaining < minimum_post_gate_seconds", workflow)
+        self.assertGreaterEqual(workflow.count("--terminal-deadline-epoch"), 10)
+        self.assertGreaterEqual(workflow.count("timeout-minutes: 5"), 7)
 
     def test_failed_deployment_json_is_required_before_both_upload_attempts(self):
         root = __import__("pathlib").Path(__file__).resolve().parents[1]
         workflow = (root / ".github" / "workflows" / "hf-space-deploy.yml").read_text(encoding="utf-8")
         self.assertIn("id: deployment-failure-json", workflow)
         self.assertIn('test -s "$RUNNER_TEMP/hf-deploy-failure.json"', workflow)
-        self.assertEqual(workflow.count("steps.deployment-failure-json.outcome == 'success'"), 2)
+        self.assertIn("validate-failure-evidence", workflow)
+        self.assertGreaterEqual(workflow.count("steps.deployment-failure-json.outcome == 'success'"), 2)
         preflight = workflow.index("id: deployment-failure-json")
         primary = workflow.index("id: deployment-failure-artifact-primary")
         retry = workflow.index("id: deployment-failure-artifact-retry")
         self.assertLess(preflight, primary)
         self.assertLess(primary, retry)
+
+    def test_failed_deployment_receipt_validator_is_exact_and_fail_closed(self):
+        module = __import__("scripts.deploy_hf_space", fromlist=["validate_failure_evidence"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            failure = root / "failure.json"
+            module.write_failure_evidence(
+                failure,
+                SOURCE_SHA,
+                RuntimeError("transport failed"),
+                root / "missing-result.json",
+                {},
+            )
+            validated = module.validate_failure_evidence(failure, SOURCE_SHA)
+            self.assertEqual(validated["schema"], "szl.hf-deploy-failure/v2")
+            self.assertEqual(validated["status"], "FAILED_BEFORE_MUTATION")
+            for mutation in (
+                {},
+                {**validated, "deployment_success": True},
+                {**validated, "source_revision": "0" * 40},
+                {**validated, "status": "PARTIAL_AFTER_MUTATION", "hf_revision": None},
+            ):
+                failure.write_bytes(module.canonical_json(mutation))
+                with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                    module.validate_failure_evidence(failure, SOURCE_SHA)
+
+    def test_shared_terminal_deadline_converts_once_and_requires_reserve(self):
+        module = __import__("scripts.deploy_hf_space", fromlist=["terminal_deadline_from_epoch"])
+        with mock.patch.object(module.time, "time", return_value=1599999400.0), mock.patch.object(
+            module.time, "monotonic", return_value=250.0
+        ):
+            deadline = module.terminal_deadline_from_epoch("1600000000")
+            self.assertEqual(deadline, 850.0)
+            self.assertEqual(module.require_terminal_budget(deadline, 599, "test"), 600.0)
+            with self.assertRaisesRegex(module.RetryExhausted, "reserved budget"):
+                module.require_terminal_budget(deadline, 601, "test")
 
 
 if __name__ == "__main__":

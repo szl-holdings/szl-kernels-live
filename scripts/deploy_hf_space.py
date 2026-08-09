@@ -33,6 +33,10 @@ TRANSIENT_HTTP_STATUS = frozenset({429, *range(500, 600)})
 ATTEST_TIMEOUT_SECONDS = 600
 MUTATION_READBACK_SECONDS = 30
 MUTATION_TIMEOUT_SECONDS = 300
+GOVERNANCE_TIMEOUT_SECONDS = 150
+DEPLOY_PHASE_TIMEOUT_SECONDS = 600
+ATTEST_PHASE_TIMEOUT_SECONDS = ATTEST_TIMEOUT_SECONDS + GOVERNANCE_TIMEOUT_SECONDS + 30
+TERMINAL_CLOSURE_RESERVE_SECONDS = 1800
 RETRY_DELAY_SECONDS = 2
 UA = "szl-kernels-live-deployer/1.0"
 HF_WINDOW_PREFIX = b"<script>window.huggingface="
@@ -182,6 +186,29 @@ def _remaining_timeout(deadline: float, cap: float) -> float:
     return max(0.001, min(cap, remaining))
 
 
+def terminal_deadline_from_epoch(deadline_epoch: object) -> float:
+    normalized = str(deadline_epoch or "")
+    if not re.fullmatch(r"[0-9]{10,}", normalized):
+        raise RuntimeError("terminal deadline epoch is malformed")
+    remaining = int(normalized) - time.time()
+    if remaining <= 0:
+        raise RetryExhausted("shared terminal deadline expired")
+    return time.monotonic() + remaining
+
+
+def require_terminal_budget(
+    deadline: float,
+    minimum_remaining: float,
+    label: str,
+) -> float:
+    remaining = deadline - time.monotonic()
+    if minimum_remaining < 0 or remaining < minimum_remaining:
+        raise RetryExhausted(
+            f"shared terminal deadline lacks reserved budget for {label}"
+        )
+    return remaining
+
+
 def _request_json(url: str, token: str = "", timeout: float = 30) -> object:
     headers = {"Accept": "application/json", "User-Agent": UA}
     if token:
@@ -322,7 +349,11 @@ def evaluate_effective_rulesets(
     return [GOVERNED_RULESET_ID], []
 
 
-def require_governed_main(source_sha: str) -> dict[str, object]:
+def require_governed_main(
+    source_sha: str,
+    *,
+    deadline: float | None = None,
+) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     source_ref = os.environ.get("GITHUB_REF", "")
@@ -337,14 +368,24 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
             "GOVERNANCE_TOKEN is required for protected-main reauthorization"
         )
 
-    metadata = _request_json(f"{api_root}/repos/{repository}", token)
+    def governed_json(url: str) -> object:
+        if deadline is None:
+            return _request_json(url, token)
+        require_terminal_budget(deadline, 0, "protected-main governance readback")
+        return _request_json(
+            url,
+            token,
+            timeout=_remaining_timeout(deadline, 30),
+        )
+
+    metadata = governed_json(f"{api_root}/repos/{repository}")
     if not isinstance(metadata, dict) or (
         metadata.get("id") != GOVERNED_REPOSITORY_ID
         or metadata.get("full_name") != SOURCE_REPO
         or metadata.get("default_branch") != "main"
     ):
         raise RuntimeError("repository identity/default branch is not exact")
-    branch = _request_json(f"{api_root}/repos/{repository}/branches/main", token)
+    branch = governed_json(f"{api_root}/repos/{repository}/branches/main")
     if not isinstance(branch, dict) or branch.get("protected") is not True:
         raise RuntimeError("repository main branch is not protected")
     live_sha = exact_sha(
@@ -356,16 +397,16 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
             f"refusing stale release: current main {live_sha} != source {source_sha}"
         )
 
-    summaries = _request_json(
-        f"{api_root}/repos/{repository}/rulesets?includes_parents=true", token
+    summaries = governed_json(
+        f"{api_root}/repos/{repository}/rulesets?includes_parents=true"
     )
-    effective_rules = _request_json(
-        f"{api_root}/repos/{repository}/rules/branches/main", token
+    effective_rules = governed_json(
+        f"{api_root}/repos/{repository}/rules/branches/main"
     )
     details: dict[int, object] = {}
     try:
-        details[GOVERNED_RULESET_ID] = _request_json(
-            f"{api_root}/repos/{repository}/rulesets/{GOVERNED_RULESET_ID}", token
+        details[GOVERNED_RULESET_ID] = governed_json(
+            f"{api_root}/repos/{repository}/rulesets/{GOVERNED_RULESET_ID}"
         )
     except Exception as error:
         details[GOVERNED_RULESET_ID] = {
@@ -609,6 +650,7 @@ def deploy_bundle(
     mutation_state: dict[str, object] | None = None,
     *,
     mutation_timeout: float = MUTATION_TIMEOUT_SECONDS,
+    terminal_deadline: float | None = None,
 ) -> dict[str, object]:
     if mutation_state is None:
         mutation_state = {}
@@ -621,10 +663,25 @@ def deploy_bundle(
     )
     source_sha = exact_sha(source_sha, "workflow source")
     manifest = validate_bundle(bundle, source_sha)
-    authorization = require_governed_main(source_sha)
+    deploy_deadline = None
+    if terminal_deadline is not None:
+        deploy_deadline = min(
+            time.monotonic() + DEPLOY_PHASE_TIMEOUT_SECONDS,
+            terminal_deadline
+            - TERMINAL_CLOSURE_RESERVE_SECONDS
+            - ATTEST_PHASE_TIMEOUT_SECONDS,
+        )
+        require_terminal_budget(deploy_deadline, 1, "governed deployment phase")
+    authorization = (
+        require_governed_main(source_sha)
+        if deploy_deadline is None
+        else require_governed_main(source_sha, deadline=deploy_deadline)
+    )
 
     child_environment = _hf_upload_child_environment()
     mutation_deadline = time.monotonic() + mutation_timeout
+    if deploy_deadline is not None:
+        mutation_deadline = min(mutation_deadline, deploy_deadline)
     before = _request_json_retry(
         f"https://huggingface.co/api/spaces/{HF_REPO}",
         deadline=mutation_deadline,
@@ -634,7 +691,11 @@ def deploy_bundle(
         raise RuntimeError("pre-mutation Hugging Face response is malformed")
     before_sha = exact_sha(before.get("sha"), "observed Hugging Face parent revision")
 
-    mutation_authorization = require_governed_main(source_sha)
+    mutation_authorization = (
+        require_governed_main(source_sha)
+        if deploy_deadline is None
+        else require_governed_main(source_sha, deadline=mutation_deadline)
+    )
     if mutation_authorization != authorization:
         raise RuntimeError("protected-main authorization changed before publication")
     mutation_boundary = {
@@ -1214,6 +1275,7 @@ def attest_publication(
     attestation_path: Path,
     *,
     timeout: int = ATTEST_TIMEOUT_SECONDS,
+    terminal_deadline: float | None = None,
 ) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
     manifest = validate_bundle(bundle, source_sha)
@@ -1226,7 +1288,23 @@ def attest_publication(
         "deployment result previous revision",
     )
 
+    governance_deadline = None
     deadline = time.monotonic() + timeout
+    if terminal_deadline is not None:
+        governance_deadline = min(
+            time.monotonic() + ATTEST_PHASE_TIMEOUT_SECONDS,
+            terminal_deadline - TERMINAL_CLOSURE_RESERVE_SECONDS,
+        )
+        require_terminal_budget(
+            governance_deadline,
+            GOVERNANCE_TIMEOUT_SECONDS + 1,
+            "governed public attestation phase",
+        )
+        deadline = min(
+            deadline,
+            governance_deadline - GOVERNANCE_TIMEOUT_SECONDS,
+        )
+        require_terminal_budget(deadline, 1, "public byte readback phase")
     runtime_stage = _wait_for_exact_running(
         target_sha,
         previous_sha,
@@ -1283,7 +1361,11 @@ def attest_publication(
         source_sha,
     )
 
-    post_publication_main = require_governed_main(source_sha)
+    post_publication_main = (
+        require_governed_main(source_sha)
+        if governance_deadline is None
+        else require_governed_main(source_sha, deadline=governance_deadline)
+    )
 
     attestation = {
         "schema": "szl.hf-live-attestation/v2",
@@ -1386,6 +1468,79 @@ def write_failure_evidence(
             }
         )
     )
+
+
+def validate_failure_evidence(
+    path: Path,
+    source_sha: str,
+) -> dict[str, object]:
+    source_sha = exact_sha(source_sha, "workflow source")
+    try:
+        raw = path.read_bytes()
+        evidence = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("failed-deployment evidence is unreadable or malformed") from error
+    if not isinstance(evidence, dict) or canonical_json(evidence) != raw:
+        raise RuntimeError("failed-deployment evidence is not a canonical JSON object")
+    required_fields = {
+        "schema",
+        "status",
+        "receipt_minted",
+        "measured",
+        "deployment_success",
+        "upload_call_entered",
+        "authoritative_readback_attempted",
+        "source_repository",
+        "source_revision",
+        "source_relation",
+        "hf_revision",
+        "error_type",
+        "error",
+        "target",
+    }
+    if set(evidence) != required_fields:
+        raise RuntimeError("failed-deployment evidence field set is not exact")
+    status = evidence.get("status")
+    if status not in {
+        "FAILED_BEFORE_MUTATION",
+        "MUTATION_OUTCOME_UNKNOWN",
+        "PARTIAL_AFTER_MUTATION",
+    }:
+        raise RuntimeError("failed-deployment evidence status is not terminal failure")
+    if any(
+        (
+            evidence.get("schema") != "szl.hf-deploy-failure/v2",
+            evidence.get("receipt_minted") is not False,
+            evidence.get("measured") is not False,
+            evidence.get("deployment_success") is not False,
+            not isinstance(evidence.get("upload_call_entered"), bool),
+            not isinstance(evidence.get("authoritative_readback_attempted"), bool),
+            evidence.get("source_repository") != SOURCE_REPO,
+            evidence.get("source_revision") != source_sha,
+            evidence.get("source_relation") != SOURCE_RELATION,
+            evidence.get("target") != HF_REPO,
+            not isinstance(evidence.get("error_type"), str),
+            not evidence.get("error_type"),
+            not isinstance(evidence.get("error"), str),
+            len(evidence.get("error", "")) > 1000,
+        )
+    ):
+        raise RuntimeError("failed-deployment evidence identity or failure assertions differ")
+    entered = evidence["upload_call_entered"]
+    revision = evidence["hf_revision"]
+    if status == "FAILED_BEFORE_MUTATION":
+        coherent = entered is False and revision is None
+    elif status == "MUTATION_OUTCOME_UNKNOWN":
+        coherent = entered is True and revision is None
+    else:
+        coherent = (
+            entered is True
+            and isinstance(revision, str)
+            and bool(HEX40.fullmatch(revision))
+        )
+    if not coherent:
+        raise RuntimeError("failed-deployment evidence mutation state is contradictory")
+    return evidence
 
 
 def write_workflow_stage_failure(
@@ -1870,7 +2025,10 @@ def stage_failure_main(argv: list[str]) -> int:
     parser.add_argument("--finalize-receipt-outcome", required=True)
     parser.add_argument("--terminal-artifact-outcome", required=True)
     parser.add_argument("--cleanup-path", type=Path, action="append", default=[])
+    parser.add_argument("--terminal-deadline-epoch", required=True)
     args = parser.parse_args(argv)
+    terminal_deadline = terminal_deadline_from_epoch(args.terminal_deadline_epoch)
+    require_terminal_budget(terminal_deadline, 1000, "receipt-stage failure closure")
     cleanup_complete = cleanup_terminal_success_files(args.cleanup_path)
     evidence = write_workflow_stage_failure(
         args.failure_evidence,
@@ -1896,7 +2054,10 @@ def candidate_receipt_main(argv: list[str]) -> int:
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--measurement", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--terminal-deadline-epoch", required=True)
     args = parser.parse_args(argv)
+    terminal_deadline = terminal_deadline_from_epoch(args.terminal_deadline_epoch)
+    require_terminal_budget(terminal_deadline, 1450, "candidate receipt closure")
     receipt = synthesize_candidate_receipt(
         args.output,
         args.source_sha,
@@ -1920,7 +2081,10 @@ def finalize_receipt_main(argv: list[str]) -> int:
     parser.add_argument("--attestation-id", required=True)
     parser.add_argument("--attestation-url", required=True)
     parser.add_argument("--bundle-path", required=True)
+    parser.add_argument("--terminal-deadline-epoch", required=True)
     args = parser.parse_args(argv)
+    terminal_deadline = terminal_deadline_from_epoch(args.terminal_deadline_epoch)
+    require_terminal_budget(terminal_deadline, 1150, "final receipt closure")
     envelope = finalize_attested_receipt(
         args.candidate,
         args.output,
@@ -1950,9 +2114,46 @@ def enforce_terminal_main(argv: list[str]) -> int:
     parser.add_argument("--failure-artifact-retry-outcome", required=True)
     parser.add_argument("--deployment-failure-artifact-primary-outcome", required=True)
     parser.add_argument("--deployment-failure-artifact-retry-outcome", required=True)
+    parser.add_argument("--terminal-deadline-epoch", required=True)
     args = parser.parse_args(argv)
+    terminal_deadline = terminal_deadline_from_epoch(args.terminal_deadline_epoch)
+    require_terminal_budget(terminal_deadline, 30, "terminal enforcement")
     result = enforce_terminal_evidence(**vars(args))
     print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def deadline_guard_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--terminal-deadline-epoch", required=True)
+    parser.add_argument("--minimum-remaining-seconds", type=int, required=True)
+    parser.add_argument("--label", required=True)
+    args = parser.parse_args(argv)
+    deadline = terminal_deadline_from_epoch(args.terminal_deadline_epoch)
+    remaining = require_terminal_budget(
+        deadline,
+        args.minimum_remaining_seconds,
+        args.label,
+    )
+    print(
+        json.dumps(
+            {"label": args.label, "remaining_seconds": int(remaining)},
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def validate_failure_evidence_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--failure-evidence", type=Path, required=True)
+    parser.add_argument("--terminal-deadline-epoch", required=True)
+    args = parser.parse_args(argv)
+    deadline = terminal_deadline_from_epoch(args.terminal_deadline_epoch)
+    require_terminal_budget(deadline, 700, "failed-deployment evidence preservation")
+    evidence = validate_failure_evidence(args.failure_evidence, args.source_sha)
+    print(json.dumps(evidence, sort_keys=True))
     return 0
 
 
@@ -1967,22 +2168,35 @@ def main() -> int:
         return finalize_receipt_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "enforce-terminal":
         return enforce_terminal_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "deadline-guard":
+        return deadline_guard_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "validate-failure-evidence":
+        return validate_failure_evidence_main(sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--attestation", type=Path, required=True)
     parser.add_argument("--failure-evidence", type=Path, required=True)
+    parser.add_argument("--terminal-deadline-epoch", required=True)
     args = parser.parse_args()
     source_sha = exact_sha(args.source_sha, "workflow source")
+    terminal_deadline = terminal_deadline_from_epoch(args.terminal_deadline_epoch)
     mutation_state: dict[str, object] = {}
     try:
-        deploy_bundle(args.bundle, source_sha, args.result, mutation_state)
+        deploy_bundle(
+            args.bundle,
+            source_sha,
+            args.result,
+            mutation_state,
+            terminal_deadline=terminal_deadline,
+        )
         attestation = attest_publication(
             args.bundle,
             source_sha,
             args.result,
             args.attestation,
+            terminal_deadline=terminal_deadline,
         )
     except Exception as error:
         write_failure_evidence(
