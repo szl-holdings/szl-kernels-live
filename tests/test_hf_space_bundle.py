@@ -180,7 +180,39 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertIn('test "$live_sha" = "$GITHUB_SHA"', workflow)
         self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', workflow)
         self.assertIn("persist-credentials: false", workflow)
-        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", workflow)
+        governance_action = (
+            "actions/create-github-app-token@"
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1"
+        )
+        self.assertIn(governance_action, workflow)
+        self.assertIn("client-id: ${{ vars.QILLQAQ_CLIENT_ID }}", workflow)
+        self.assertIn(
+            "private-key: ${{ secrets.QILLQAQ_PRIVATE_KEY }}", workflow
+        )
+        self.assertIn("owner: ${{ github.repository_owner }}", workflow)
+        self.assertIn("repositories: ${{ github.event.repository.name }}", workflow)
+        self.assertIn("permission-administration: read", workflow)
+        self.assertIn("permission-contents: read", workflow)
+        self.assertEqual(workflow.count("          permission-"), 2)
+        self.assertGreaterEqual(
+            workflow.count(
+                "GOVERNANCE_TOKEN: ${{ steps.governance-token.outputs.token }}"
+            ),
+            3,
+        )
+        self.assertNotIn("GITHUB_TOKEN: ${{ github.token }}", workflow)
+        self.assertNotIn("GH_TOKEN: ${{ github.token }}", workflow)
+        mint_governance = workflow.index(
+            "Mint least-privilege governed ruleset reader"
+        )
+        require_governance = workflow.index(
+            "Require governed ruleset reader token"
+        )
+        hf_credential = workflow.index("HF_TOKEN: ${{ secrets.HF_TOKEN }}")
+        self.assertLess(mint_governance, require_governance)
+        self.assertLess(require_governance, guard)
+        self.assertLess(guard, hf_credential)
+        self.assertIn('test -n "$GOVERNANCE_TOKEN"', workflow)
         self.assertIn('--result "$RUNNER_TEMP/hf-deploy-result.json"', workflow)
         self.assertIn(
             '--attestation "$RUNNER_TEMP/hf-live-attestation.json"', workflow
@@ -279,6 +311,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
 
     def test_in_process_guard_requires_exact_effective_no_bypass_main(self) -> None:
         def response(url: str, _token: str = "") -> object:
+            self.assertEqual(_token, "test-token")
             if url.endswith("/repos/szl-holdings/szl-kernels-live"):
                 return {"default_branch": "main"}
             if url.endswith("/rulesets?includes_parents=true"):
@@ -312,7 +345,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         environment = {
             "GITHUB_REPOSITORY": "szl-holdings/szl-kernels-live",
             "GITHUB_REF": "refs/heads/main",
-            "GITHUB_TOKEN": "test-token",
+            "GOVERNANCE_TOKEN": "test-token",
             "GITHUB_API_URL": "https://api.github.test",
         }
         with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
@@ -332,6 +365,22 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         ), self.assertRaisesRegex(RuntimeError, "bypass actors were not disclosed"):
             require_governed_main(SOURCE_SHA)
 
+    def test_in_process_guard_rejects_empty_governance_token_before_api(self) -> None:
+        environment = {
+            "GITHUB_REPOSITORY": "szl-holdings/szl-kernels-live",
+            "GITHUB_REF": "refs/heads/main",
+            "GOVERNANCE_TOKEN": "",
+            "GITHUB_API_URL": "https://api.github.test",
+        }
+        with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
+            "scripts.deploy_hf_space._request_json"
+        ) as request_json, self.assertRaisesRegex(
+            RuntimeError,
+            "GOVERNANCE_TOKEN is required for protected-main reauthorization",
+        ):
+            require_governed_main(SOURCE_SHA)
+        request_json.assert_not_called()
+
     def test_public_attestation_binds_exact_revision_bytes_and_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / "bundle"
@@ -349,6 +398,9 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 encoding="utf-8",
             )
             attestation = Path(temporary) / "attestation.json"
+            runtime_provenance = json.loads(
+                (bundle / "SPACE_PROVENANCE.json").read_text(encoding="utf-8")
+            )
             expected_paths = {
                 path.relative_to(bundle).as_posix()
                 for path in bundle.rglob("*")
@@ -369,7 +421,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     relative = urllib.parse.unquote(url.split(marker, 1)[1])
                     return 200, (bundle / relative).read_bytes()
                 if "SPACE_PROVENANCE.json" in url:
-                    return 200, (bundle / "SPACE_PROVENANCE.json").read_bytes()
+                    return 200, canonical_json(runtime_provenance)
                 return 200, b"<html>operational</html>"
 
             with mock.patch(
@@ -406,6 +458,42 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 json.loads(attestation.read_text(encoding="utf-8")), evidence
             )
             self.assertEqual(attestation.read_bytes(), canonical_json(evidence))
+
+            invalid_sources = (
+                ("missing repository", "repository", None),
+                ("wrong repository", "repository", "szl-holdings/other"),
+                ("missing relation", "relation", None),
+                ("wrong relation", "relation", "unbound-observation"),
+            )
+            for label, field, value in invalid_sources:
+                with self.subTest(label=label):
+                    runtime_provenance = json.loads(
+                        (bundle / "SPACE_PROVENANCE.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    if value is None:
+                        runtime_provenance["source"].pop(field)
+                    else:
+                        runtime_provenance["source"][field] = value
+                    with mock.patch(
+                        "scripts.deploy_hf_space._request_json", side_effect=hf_json
+                    ), mock.patch(
+                        "scripts.deploy_hf_space._public_bytes",
+                        side_effect=public_bytes,
+                    ), mock.patch(
+                        "scripts.deploy_hf_space.time.sleep"
+                    ), self.assertRaisesRegex(
+                        RuntimeError,
+                        "public static source identity did not close",
+                    ):
+                        attest_publication(
+                            bundle,
+                            SOURCE_SHA,
+                            result,
+                            Path(temporary) / f"invalid-{field}.json",
+                            timeout=1,
+                        )
 
 
 if __name__ == "__main__":

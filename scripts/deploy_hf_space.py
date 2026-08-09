@@ -136,14 +136,16 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     source_ref = os.environ.get("GITHUB_REF", "")
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = os.environ.get("GOVERNANCE_TOKEN", "")
     api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
     if repository != SOURCE_REPO:
         raise RuntimeError(f"unexpected GitHub repository: {repository!r}")
     if source_ref != "refs/heads/main":
         raise RuntimeError(f"refusing production release from {source_ref!r}")
     if not token:
-        raise RuntimeError("GITHUB_TOKEN is required for protected-main reauthorization")
+        raise RuntimeError(
+            "GOVERNANCE_TOKEN is required for protected-main reauthorization"
+        )
 
     metadata = _request_json(f"{api_root}/repos/{repository}", token)
     if not isinstance(metadata, dict) or metadata.get("default_branch") != "main":
@@ -428,17 +430,22 @@ def attest_publication(
             provenance = json.loads(provenance_body)
         except json.JSONDecodeError:
             provenance = {}
+        public_source = provenance.get("source") or {}
         if (
             ui_status == 200
             and ui_body
             and provenance_status == 200
             and provenance.get("schema") == "szl.deployment-source/v3"
-            and (provenance.get("source") or {}).get("commit") == source_sha
+            and public_source.get("repository") == SOURCE_REPO
+            and public_source.get("commit") == source_sha
+            and public_source.get("relation") == "source-bound-release-bundle"
         ):
             break
         last_error = (
             f"ui={ui_status}/{len(ui_body)} provenance={provenance_status}/"
-            f"{(provenance.get('source') or {}).get('commit')!r}"
+            f"{public_source.get('repository')!r}/"
+            f"{public_source.get('commit')!r}/"
+            f"{public_source.get('relation')!r}"
         )
         if attempt < 11:
             time.sleep(5)

@@ -37,20 +37,37 @@ jobs:
             --output "$RUNNER_TEMP/hf-bundle" \
             --source-sha "$GITHUB_SHA" \
             > "$RUNNER_TEMP/hf-bundle-result.json"
+      - name: Mint least-privilege governed ruleset reader
+        id: governance-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.QILLQAQ_CLIENT_ID }}
+          private-key: ${{ secrets.QILLQAQ_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          permission-contents: read
+      - name: Require governed ruleset reader token
+        env:
+          GOVERNANCE_TOKEN: ${{ steps.governance-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          test -n "$GOVERNANCE_TOKEN"
       - name: Attest deployment manifest
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: ${{ runner.temp }}/hf-bundle/hf-deploy-manifest.json
       - name: Reauthorize exact protected main before credential use
         env:
-          GH_TOKEN: ${{ github.token }}
+          GOVERNANCE_TOKEN: ${{ steps.governance-token.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
+          test -n "$GOVERNANCE_TOKEN"
           test "$GITHUB_REF" = "refs/heads/main"
           live_sha="$(
             curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
-              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Authorization: Bearer $GOVERNANCE_TOKEN" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/branches/main" \
               | python -c 'import json,sys; data=json.load(sys.stdin); data.get("protected") is True or sys.exit("main is not protected"); print(data["commit"]["sha"])'
@@ -59,7 +76,7 @@ jobs:
           printf 'Protected main remains exact at %s\n' "$live_sha"
       - name: Publish exact protected-main bundle
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GOVERNANCE_TOKEN: ${{ steps.governance-token.outputs.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
