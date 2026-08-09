@@ -1667,6 +1667,11 @@ def validate_deployment_failure_receipt(
         raise RuntimeError("failed-deployment receipt revision contradicts its status")
     if value["status"] == "FAILED_BEFORE_MUTATION" and value["upload_call_entered"]:
         raise RuntimeError("failed-before-mutation receipt contradicts its mutation marker")
+    if (
+        value["status"] == "FAILED_BEFORE_MUTATION"
+        and value["authoritative_readback_attempted"]
+    ):
+        raise RuntimeError("failed-before-mutation receipt contradicts authoritative readback")
     if value["status"] == "MUTATION_OUTCOME_UNKNOWN" and not value["upload_call_entered"]:
         raise RuntimeError("unknown mutation receipt lacks its mutation marker")
     if (

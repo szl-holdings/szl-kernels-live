@@ -1767,6 +1767,24 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             write_failure_evidence(
                 failure,
                 SOURCE_SHA,
+                RuntimeError("pre-mutation failure"),
+                root / "missing-result.json",
+                {
+                    "upload_call_entered": False,
+                    "authoritative_readback_attempted": False,
+                    "known_hf_revision": None,
+                },
+            )
+            before_mutation = validate_deployment_failure_receipt(failure, SOURCE_SHA)
+            self.assertEqual(before_mutation["status"], "FAILED_BEFORE_MUTATION")
+            before_mutation["authoritative_readback_attempted"] = True
+            failure.write_bytes(canonical_json(before_mutation))
+            with self.assertRaisesRegex(RuntimeError, "contradicts authoritative readback"):
+                validate_deployment_failure_receipt(failure, SOURCE_SHA)
+
+            write_failure_evidence(
+                failure,
+                SOURCE_SHA,
                 RuntimeError("post-mutation failure"),
                 root / "missing-result.json",
                 {
