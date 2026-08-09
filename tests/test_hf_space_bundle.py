@@ -17,6 +17,7 @@ import urllib.parse
 
 from scripts.build_hf_space_bundle import build_bundle
 from scripts.deploy_hf_space import (
+    BOUNDED_ACTIONS,
     GOVERNED_RULESET_ID,
     HF_WINDOW_MAX_INJECTION_BYTES,
     HF_REPO,
@@ -44,6 +45,7 @@ from scripts.deploy_hf_space import (
     normalize_public_static_index,
     require_governed_main,
     require_receipt_failure_artifact,
+    run_bounded_action,
     synthesize_candidate_receipt,
     validate_deployment_failure_receipt,
     validate_bundle,
@@ -1216,7 +1218,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             }
             def hanging_child(_command, *, entered_marker, mutation_state, **_kwargs):
                 child_environment.update(_kwargs["environment"])
-                entered_marker.write_text("entered", encoding="utf-8")
+                entered_marker.write_bytes(b"UPLOAD_CALL_ENTERED\n")
                 mutation_state["upload_call_entered"] = True
                 raise TimeoutError("transport reset")
 
@@ -1290,6 +1292,48 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "FAILED_BEFORE_MUTATION",
             )
 
+    def test_pre_entry_child_failure_never_attempts_authoritative_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            build_bundle(bundle, SOURCE_SHA)
+            result = root / "result.json"
+            state: dict[str, object] = {}
+            with mock.patch.dict(
+                os.environ, {"HF_TOKEN": "test-hf-token"}, clear=True
+            ), mock.patch(
+                "scripts.deploy_hf_space.require_governed_main",
+                return_value={"status": "AUTHORIZED"},
+            ), mock.patch(
+                "scripts.deploy_hf_space._request_json_retry",
+                return_value={"sha": PARENT_SHA},
+            ), mock.patch(
+                "scripts.deploy_hf_space._run_killable_child",
+                side_effect=RuntimeError("child import failed before upload"),
+            ), mock.patch(
+                "scripts.deploy_hf_space._recover_authoritative_revision"
+            ) as recover, self.assertRaisesRegex(
+                RuntimeError, "child import failed before upload"
+            ) as caught:
+                deploy_bundle(bundle, SOURCE_SHA, result, state)
+
+            recover.assert_not_called()
+            self.assertFalse(state["upload_call_entered"])
+            self.assertFalse(state["authoritative_readback_attempted"])
+            self.assertIsNone(state["known_hf_revision"])
+            self.assertEqual(
+                json.loads(result.read_text(encoding="utf-8"))["status"],
+                "MUTATION_CHILD_PREPARED",
+            )
+            failure = root / "failure.json"
+            write_failure_evidence(
+                failure, SOURCE_SHA, caught.exception, result, state
+            )
+            receipt = validate_deployment_failure_receipt(failure, SOURCE_SHA)
+            self.assertEqual(receipt["status"], "FAILED_BEFORE_MUTATION")
+            self.assertFalse(receipt["upload_call_entered"])
+            self.assertFalse(receipt["authoritative_readback_attempted"])
+
     def test_real_hanging_child_is_killed_with_bounded_unknown_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1309,7 +1353,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "-I",
                 "-P",
                 "-c",
-                "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('entered'); time.sleep(60)",
+                "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_bytes(b'UPLOAD_CALL_ENTERED\\n'); time.sleep(60)",
                 str(marker),
             ]
             state: dict[str, object] = {}
@@ -1477,7 +1521,21 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "runtime_stage": "RUNNING",
                 "bundle_sha256": manifest["bundle_sha256"],
                 "file_count": manifest["file_count"],
-                "tree_sha256": "e" * 64,
+                "tree_sha256": hashlib.sha256(
+                    canonical_json(
+                        sorted(
+                            (
+                                {
+                                    "path": row["path"],
+                                    "bytes": row["bytes"],
+                                    "sha256": row["sha256"],
+                                }
+                                for row in manifest["files"]
+                            ),
+                            key=lambda row: row["path"],
+                        )
+                    )
+                ).hexdigest(),
                 "public_index": public_index,
                 "public_provenance": {
                     "verified": True,
@@ -1533,6 +1591,20 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             )
             self.assertNotIn("attestation", json.loads(output.read_text(encoding="utf-8")))
             self.assertEqual(envelope_path.read_bytes(), canonical_json(envelope))
+
+            invalid_tree = dict(measured)
+            invalid_tree["tree_sha256"] = "f" * 64
+            measurement.write_bytes(canonical_json(invalid_tree))
+            rejected_tree = root / "rejected-tree-digest.json"
+            with self.assertRaisesRegex(RuntimeError, "cross.tree_sha256_manifest"):
+                synthesize_candidate_receipt(
+                    rejected_tree,
+                    SOURCE_SHA,
+                    bundle,
+                    result,
+                    measurement,
+                )
+            self.assertFalse(rejected_tree.exists())
 
             for field in ("receipt_minted", "deployment_success"):
                 invalid = dict(measured)
@@ -1830,6 +1902,97 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             )
         self.assertLess(time.monotonic() - started, 2.0)
 
+    def test_bounded_actions_receive_exact_wrapper_and_upload_runtime_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            captured: dict[str, dict[str, str]] = {}
+
+            def invoke(action: str, declared: dict[str, str]) -> dict[str, str]:
+                descriptor = BOUNDED_ACTIONS[action]
+                entry = workspace / descriptor["entry"]
+                entry.parent.mkdir(parents=True, exist_ok=True)
+                entry.write_bytes(b"pinned runtime")
+                digests = {entry.resolve(): descriptor["sha256"]}
+                contract_relative = descriptor.get("contract")
+                if contract_relative is not None:
+                    contract = workspace / contract_relative
+                    contract.parent.mkdir(parents=True, exist_ok=True)
+                    contract.write_bytes(b"pinned wrapper contract")
+                    digests[contract.resolve()] = descriptor["contract_sha256"]
+
+                environment = {
+                    "GITHUB_WORKSPACE": str(workspace),
+                    "HF_TERMINAL_DEADLINE_EPOCH": str(int(time.time()) + 600),
+                    "HF_TOKEN": "must-not-reach-action",
+                    "GOVERNANCE_TOKEN": "must-not-reach-action",
+                    **declared,
+                }
+
+                def capture(_command, *, environment, **_kwargs):
+                    captured[action] = environment
+
+                with mock.patch.dict(os.environ, environment, clear=True), mock.patch(
+                    "scripts.deploy_hf_space.sha256_file",
+                    side_effect=lambda path: digests[path.resolve()],
+                ), mock.patch(
+                    "scripts.deploy_hf_space.shutil.which", return_value="/exact/node"
+                ), mock.patch(
+                    "scripts.deploy_hf_space.subprocess.run",
+                    return_value=types.SimpleNamespace(stdout="24.19.0"),
+                ), mock.patch(
+                    "scripts.deploy_hf_space._run_bounded_process",
+                    side_effect=capture,
+                ):
+                    run_bounded_action(action, reserve_seconds=60, max_seconds=30)
+                return captured[action]
+
+            upload = invoke(
+                "upload",
+                {
+                    "DEADLINE_ACTION_INPUT_NAME": "evidence",
+                    "DEADLINE_ACTION_INPUT_PATH": "evidence.json",
+                    "DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND": "error",
+                    "DEADLINE_ACTION_INPUT_RETENTION_DAYS": "90",
+                    "DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL": "6",
+                    "DEADLINE_ACTION_INPUT_OVERWRITE": "false",
+                    "DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES": "false",
+                    "DEADLINE_ACTION_INPUT_ARCHIVE": "true",
+                },
+            )
+            for name, value in BOUNDED_ACTIONS["upload"]["defaults"].items():
+                self.assertEqual(upload[f"INPUT_{name.upper()}"], value)
+
+            attest = invoke(
+                "attest-build-provenance",
+                {
+                    "DEADLINE_ACTION_INPUT_SUBJECT_PATH": "canonical-receipt.json",
+                    "DEADLINE_ACTION_INPUT_SUBJECT_DIGEST": "",
+                    "DEADLINE_ACTION_INPUT_SUBJECT_NAME": "",
+                    "DEADLINE_ACTION_INPUT_SUBJECT_CHECKSUMS": "",
+                    "DEADLINE_ACTION_INPUT_PREDICATE_TYPE": "",
+                    "DEADLINE_ACTION_INPUT_PREDICATE": "",
+                    "DEADLINE_ACTION_INPUT_PREDICATE_PATH": "",
+                    "DEADLINE_ACTION_INPUT_PUSH_TO_REGISTRY": "false",
+                    "DEADLINE_ACTION_INPUT_CREATE_STORAGE_RECORD": "true",
+                    "DEADLINE_ACTION_INPUT_SHOW_SUMMARY": "true",
+                    "DEADLINE_ACTION_GITHUB_CREDENTIAL": "github-token",
+                },
+            )
+            self.assertEqual(
+                attest["INPUT_SUBJECT-PATH"], "canonical-receipt.json"
+            )
+            for name, value in BOUNDED_ACTIONS["attest-build-provenance"][
+                "defaults"
+            ].items():
+                self.assertEqual(attest[f"INPUT_{name.upper()}"], value)
+            self.assertEqual(attest["INPUT_GITHUB-TOKEN"], "github-token")
+            for environment in (upload, attest):
+                self.assertNotIn("HF_TOKEN", environment)
+                self.assertNotIn("GOVERNANCE_TOKEN", environment)
+                self.assertFalse(
+                    any(name.startswith("DEADLINE_ACTION_") for name in environment)
+                )
+
     def test_terminal_cleanup_is_behavioral_and_nonrecursive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1993,10 +2156,15 @@ class TerminalEvidenceEnvelopeContractTests(unittest.TestCase):
         self.assertNotIn("uses: actions/attest-build-provenance@", terminal)
         self.assertNotIn("uses: actions/upload-artifact@", terminal)
         self.assertIn("bounded-action", terminal)
-        self.assertIn("--action attest --reserve-seconds 300", terminal)
+        self.assertIn(
+            "--action attest-build-provenance --reserve-seconds 300", terminal
+        )
         self.assertIn("--action upload --reserve-seconds 300", terminal)
         self.assertIn("--action upload --reserve-seconds 60", terminal)
-        self.assertIn("Fetch pinned bounded attestation action before mutation", workflow)
+        self.assertIn(
+            "Fetch pinned build-provenance wrapper contract before mutation", workflow
+        )
+        self.assertIn("Fetch pinned bounded attestation runtime before mutation", workflow)
         self.assertIn("Fetch pinned bounded artifact action before mutation", workflow)
         self.assertIn("59d89421af93a897026c735860bf21b6eb4f7b26", workflow)
         self.assertIn("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", workflow)
@@ -2005,6 +2173,15 @@ class TerminalEvidenceEnvelopeContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn('node-version: "24.19.0"', workflow)
+        upload_calls = terminal.count("--action upload")
+        self.assertGreater(upload_calls, 0)
+        for marker in (
+            'DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"',
+            'DEADLINE_ACTION_INPUT_OVERWRITE: "false"',
+            'DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"',
+            'DEADLINE_ACTION_INPUT_ARCHIVE: "true"',
+        ):
+            self.assertEqual(terminal.count(marker), upload_calls)
 
     def test_exact_failure_receipt_is_required_before_both_upload_attempts(self) -> None:
         root = Path(__file__).resolve().parents[1]

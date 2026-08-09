@@ -61,7 +61,15 @@ jobs:
             --output "$RUNNER_TEMP/hf-bundle" \
             --source-sha "$GITHUB_SHA" \
             > "$RUNNER_TEMP/hf-bundle-result.json"
-      - name: Fetch pinned bounded attestation action before mutation
+      - name: Fetch pinned build-provenance wrapper contract before mutation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: actions/attest-build-provenance
+          ref: a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+          path: .terminal-actions/attest-build-provenance
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch pinned bounded attestation runtime before mutation
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: actions/attest
@@ -171,6 +179,10 @@ jobs:
             ${{ runner.temp }}/hf-live-attestation.json
           DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
           DEADLINE_ACTION_INPUT_RETENTION_DAYS: "90"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \
@@ -196,12 +208,20 @@ jobs:
         env:
           NODE_OPTIONS: "--max-http-header-size=32768"
           DEADLINE_ACTION_INPUT_SUBJECT_PATH: ${{ runner.temp }}/hf-terminal-candidate/hf-canonical-success-receipt.json
+          DEADLINE_ACTION_INPUT_SUBJECT_DIGEST: ""
+          DEADLINE_ACTION_INPUT_SUBJECT_NAME: ""
+          DEADLINE_ACTION_INPUT_SUBJECT_CHECKSUMS: ""
+          DEADLINE_ACTION_INPUT_PREDICATE_TYPE: ""
+          DEADLINE_ACTION_INPUT_PREDICATE: ""
+          DEADLINE_ACTION_INPUT_PREDICATE_PATH: ""
+          DEADLINE_ACTION_INPUT_PUSH_TO_REGISTRY: "false"
+          DEADLINE_ACTION_INPUT_CREATE_STORAGE_RECORD: "true"
           DEADLINE_ACTION_GITHUB_CREDENTIAL: ${{ github.token }}
           DEADLINE_ACTION_INPUT_SHOW_SUMMARY: "true"
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \
-            --action attest --reserve-seconds 300 --max-seconds 180
+            --action attest-build-provenance --reserve-seconds 300 --max-seconds 180
       - name: Promote attested receipt and bind separate metadata envelope
         id: finalize-receipt
         if: steps.oidc-receipt.outcome == 'success'
@@ -239,6 +259,10 @@ jobs:
             ${{ steps.oidc-receipt.outputs.bundle-path }}
           DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
           DEADLINE_ACTION_INPUT_RETENTION_DAYS: "90"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \
@@ -291,6 +315,10 @@ jobs:
           DEADLINE_ACTION_INPUT_PATH: ${{ runner.temp }}/hf-receipt-stage-failure.json
           DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
           DEADLINE_ACTION_INPUT_RETENTION_DAYS: "90"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \
@@ -307,6 +335,10 @@ jobs:
           DEADLINE_ACTION_INPUT_PATH: ${{ runner.temp }}/hf-receipt-stage-failure.json
           DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
           DEADLINE_ACTION_INPUT_RETENTION_DAYS: "90"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \
@@ -330,6 +362,10 @@ jobs:
           DEADLINE_ACTION_INPUT_PATH: ${{ runner.temp }}/hf-deploy-failure.json
           DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
           DEADLINE_ACTION_INPUT_RETENTION_DAYS: "90"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \
@@ -347,6 +383,10 @@ jobs:
           DEADLINE_ACTION_INPUT_PATH: ${{ runner.temp }}/hf-deploy-failure.json
           DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
           DEADLINE_ACTION_INPUT_RETENTION_DAYS: "90"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \
@@ -362,6 +402,10 @@ jobs:
             ${{ runner.temp }}/hf-live-attestation.json
           DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: warn
           DEADLINE_ACTION_INPUT_RETENTION_DAYS: "90"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \

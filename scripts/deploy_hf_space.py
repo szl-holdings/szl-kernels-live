@@ -57,13 +57,59 @@ TERMINAL_DEADLINE_ENV = "HF_TERMINAL_DEADLINE_EPOCH"
 DEADLINE_ACTION_INPUT_PREFIX = "DEADLINE_ACTION_INPUT_"
 BOUNDED_NODE_VERSION = "24.19.0"
 BOUNDED_ACTIONS = {
-    "attest": {
+    "attest-build-provenance": {
         "entry": ".terminal-actions/attest/dist/index.js",
         "sha256": "b8b1ab02d45833f537b3622cccfdfbc27c5523f232de324a51c22e465e8c6353",
+        "contract": ".terminal-actions/attest-build-provenance/action.yml",
+        "contract_sha256": "61c3292878304ea717f372f6b6b7c0b5ae6a132b91622c97529b11d02ea8da4d",
+        "inputs": frozenset(
+            {
+                "subject-path",
+                "subject-digest",
+                "subject-name",
+                "subject-checksums",
+                "predicate-type",
+                "predicate",
+                "predicate-path",
+                "push-to-registry",
+                "create-storage-record",
+                "show-summary",
+                "github-token",
+            }
+        ),
+        "defaults": {
+            "subject-digest": "",
+            "subject-name": "",
+            "subject-checksums": "",
+            "predicate-type": "",
+            "predicate": "",
+            "predicate-path": "",
+            "push-to-registry": "false",
+            "create-storage-record": "true",
+            "show-summary": "true",
+        },
     },
     "upload": {
         "entry": ".terminal-actions/upload-artifact/dist/upload/index.js",
         "sha256": "eea594941d8ee535974e0fbc03bbdf567f3abc78194f224b93f2df9a887ee2e9",
+        "inputs": frozenset(
+            {
+                "name",
+                "path",
+                "if-no-files-found",
+                "retention-days",
+                "compression-level",
+                "overwrite",
+                "include-hidden-files",
+                "archive",
+            }
+        ),
+        "defaults": {
+            "compression-level": "6",
+            "overwrite": "false",
+            "include-hidden-files": "false",
+            "archive": "true",
+        },
     },
 }
 
@@ -304,6 +350,18 @@ def run_bounded_action(
         raise RuntimeError("bounded external action entry is missing or unsafe")
     if sha256_file(entry) != descriptor["sha256"]:
         raise RuntimeError("bounded external action entry digest differs")
+    contract_relative = descriptor.get("contract")
+    if contract_relative is not None:
+        contract = (workspace / str(contract_relative)).resolve()
+        expected_contract = (workspace / str(contract_relative)).resolve()
+        if (
+            contract != expected_contract
+            or not contract.is_file()
+            or contract.is_symlink()
+        ):
+            raise RuntimeError("bounded external action contract is missing or unsafe")
+        if sha256_file(contract) != descriptor["contract_sha256"]:
+            raise RuntimeError("bounded external action contract digest differs")
     node = shutil.which("node")
     if not node:
         raise RuntimeError("pinned runner Node runtime is unavailable")
@@ -333,6 +391,11 @@ def run_bounded_action(
         inputs["github-token"] = action_credential
     if not inputs:
         raise RuntimeError("bounded external action has no declared inputs")
+    if set(inputs) != descriptor["inputs"]:
+        raise RuntimeError("bounded external action inputs are not exact")
+    for name, expected in descriptor["defaults"].items():
+        if inputs.get(name) != expected:
+            raise RuntimeError("bounded external action defaults are not exact")
     for name, value in inputs.items():
         child_environment[f"INPUT_{name.upper()}"] = value
     for secret_name in ("HF_TOKEN", "GOVERNANCE_TOKEN", "GH_TOKEN"):
@@ -709,6 +772,17 @@ def _hf_upload_child_environment() -> dict[str, str]:
     return {"HF_TOKEN": token}
 
 
+def _upload_call_entered_marker_is_exact(entered_marker: Path) -> bool:
+    try:
+        return (
+            not entered_marker.is_symlink()
+            and entered_marker.is_file()
+            and entered_marker.read_bytes() == b"UPLOAD_CALL_ENTERED\n"
+        )
+    except OSError:
+        return False
+
+
 def _run_killable_child(
     command: list[str],
     *,
@@ -733,16 +807,21 @@ def _run_killable_child(
         wait_timeout = _remaining_timeout(deadline, wait_timeout)
         process.wait(timeout=wait_timeout)
     except subprocess.TimeoutExpired:
-        mutation_state["upload_call_entered"] = entered_marker.is_file()
+        mutation_state["upload_call_entered"] = _upload_call_entered_marker_is_exact(
+            entered_marker
+        )
         _kill_and_reap_child(process)
         raise TimeoutError("Hugging Face upload child exceeded its wall-clock deadline") from None
     except BaseException:
-        mutation_state["upload_call_entered"] = entered_marker.is_file()
+        mutation_state["upload_call_entered"] = _upload_call_entered_marker_is_exact(
+            entered_marker
+        )
         _kill_and_reap_child(process)
         raise
     finally:
-        if entered_marker.is_file():
-            mutation_state["upload_call_entered"] = True
+        mutation_state["upload_call_entered"] = _upload_call_entered_marker_is_exact(
+            entered_marker
+        )
     if process.returncode != 0:
         raise RuntimeError("Hugging Face upload child failed")
 
@@ -890,9 +969,13 @@ def deploy_bundle(
             "published Hugging Face revision",
         )
     except Exception as upload_error:
-        if mutation_state.get("upload_call_entered") is True:
-            mutation_boundary["status"] = "MUTATION_BOUNDARY_CROSSED"
-            result_path.write_bytes(canonical_json(mutation_boundary))
+        upload_call_entered = _upload_call_entered_marker_is_exact(entered_marker)
+        mutation_state["upload_call_entered"] = upload_call_entered
+        if not upload_call_entered:
+            mutation_state["authoritative_readback_attempted"] = False
+            raise
+        mutation_boundary["status"] = "MUTATION_BOUNDARY_CROSSED"
+        result_path.write_bytes(canonical_json(mutation_boundary))
         mutation_state["authoritative_readback_attempted"] = True
         try:
             target_sha = _recover_authoritative_revision(
@@ -1828,6 +1911,24 @@ def _is_exact_public_index_proof(value: object) -> bool:
     )
 
 
+def _manifest_tree_sha256(manifest: dict[str, object]) -> str:
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not all(isinstance(row, dict) for row in entries):
+        raise RuntimeError("revalidated manifest tree is malformed")
+    tree = sorted(
+        (
+            {
+                "path": row["path"],
+                "bytes": row["bytes"],
+                "sha256": row["sha256"],
+            }
+            for row in entries
+        ),
+        key=lambda row: row["path"],
+    )
+    return hashlib.sha256(canonical_json(tree)).hexdigest()
+
+
 def _success_contract_violations(
     source_sha: str,
     result: dict[str, object],
@@ -1907,8 +2008,11 @@ def _success_contract_violations(
         violations.append("cross.bundle_sha256")
     if manifest is not None and result_bundle != manifest.get("bundle_sha256"):
         violations.append("cross.result_bundle_manifest")
-    if not re.fullmatch(r"[0-9a-f]{64}", str(measurement.get("tree_sha256", ""))):
+    measurement_tree = measurement.get("tree_sha256")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(measurement_tree or "")):
         violations.append("measurement.tree_sha256")
+    elif manifest is not None and measurement_tree != _manifest_tree_sha256(manifest):
+        violations.append("cross.tree_sha256_manifest")
 
     public_index = measurement.get("public_index")
     if not _is_exact_public_index_proof(public_index):
