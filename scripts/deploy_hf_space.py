@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path, PurePosixPath
 import time
 import urllib.error
@@ -21,12 +22,15 @@ SOURCE_RELATION = "source-bound-release-bundle"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_RULE_TYPES = {"pull_request", "non_fast_forward", "required_linear_history"}
 GOVERNED_RULESET_ID = 17630223
+GOVERNED_RULESET_NAME = "org-default-branch-protection"
 GOVERNED_RULESET_SOURCE = "szl-holdings"
 GOVERNED_RULESET_SOURCE_TYPE = "Organization"
+GOVERNED_REPOSITORY_ID = 1295941334
 TERMINAL_STAGES = {"BUILD_ERROR", "CONFIG_ERROR", "RUNTIME_ERROR"}
 PENDING_STAGES = {"BUILDING", "APP_STARTING", "STARTING", "RUNNING_BUILDING"}
-TRANSIENT_HTTP_STATUS = {429, 500, 502, 503, 504}
+TRANSIENT_HTTP_STATUS = frozenset({429, *range(500, 600)})
 ATTEST_TIMEOUT_SECONDS = 600
+MUTATION_READBACK_SECONDS = 30
 RETRY_DELAY_SECONDS = 2
 UA = "szl-kernels-live-deployer/1.0"
 
@@ -68,6 +72,8 @@ def exact_sha(value: object, label: str) -> str:
 
 def _retry_transient(operation, *, deadline: float, label: str):
     while True:
+        if time.monotonic() >= deadline:
+            raise RetryExhausted(f"{label} transient readback deadline expired")
         try:
             return operation()
         except urllib.error.HTTPError as error:
@@ -86,21 +92,78 @@ def _retry_transient(operation, *, deadline: float, label: str):
         time.sleep(min(RETRY_DELAY_SECONDS, max(0.0, deadline - now)))
 
 
-def _request_json(url: str, token: str = "") -> object:
+def _remaining_timeout(deadline: float, cap: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RetryExhausted("readback deadline expired")
+    return max(0.001, min(cap, remaining))
+
+
+def _request_json(url: str, token: str = "", timeout: float = 30) -> object:
     headers = {"Accept": "application/json", "User-Agent": UA}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
 
 def _request_json_retry(url: str, *, deadline: float, label: str) -> object:
     return _retry_transient(
-        lambda: _request_json(url),
+        lambda: _request_json(url, timeout=_remaining_timeout(deadline, 30)),
         deadline=deadline,
         label=label,
     )
+
+
+def _exact_pull_request_parameters() -> dict[str, object]:
+    return {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": True,
+        "required_reviewers": [],
+        "require_code_owner_review": False,
+        "require_last_push_approval": False,
+        "required_review_thread_resolution": True,
+        "allowed_merge_methods": ["squash", "rebase"],
+    }
+
+
+def _exact_baseline_detail(detail: object) -> bool:
+    if not isinstance(detail, dict):
+        return False
+    if any(
+        (
+            detail.get("id") != GOVERNED_RULESET_ID,
+            detail.get("name") != GOVERNED_RULESET_NAME,
+            detail.get("target") != "branch",
+            detail.get("source") != GOVERNED_RULESET_SOURCE,
+            detail.get("source_type") != GOVERNED_RULESET_SOURCE_TYPE,
+            detail.get("enforcement") != "active",
+            detail.get("bypass_actors") != [],
+            detail.get("conditions")
+            != {
+                "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]},
+                "repository_name": {"exclude": [], "include": ["~ALL"]},
+            },
+        )
+    ):
+        return False
+    rules = detail.get("rules")
+    if not isinstance(rules, list) or len(rules) != 3:
+        return False
+    indexed = {
+        row.get("type"): row
+        for row in rules
+        if isinstance(row, dict) and isinstance(row.get("type"), str)
+    }
+    return indexed == {
+        "pull_request": {
+            "type": "pull_request",
+            "parameters": _exact_pull_request_parameters(),
+        },
+        "non_fast_forward": {"type": "non_fast_forward"},
+        "required_linear_history": {"type": "required_linear_history"},
+    }
 
 
 def evaluate_effective_rulesets(
@@ -108,7 +171,7 @@ def evaluate_effective_rulesets(
     details: dict[int, object],
     effective_rules: object,
 ) -> tuple[list[int], list[str]]:
-    """Prove the exact inherited organization ruleset governs every effective row."""
+    """Prove the exact inherited baseline while permitting additional stronger rulesets."""
     if not isinstance(summaries, list):
         raise RuntimeError("repository ruleset inventory is unavailable")
     if not isinstance(effective_rules, list):
@@ -126,6 +189,10 @@ def evaluate_effective_rulesets(
         return [], diagnostics
 
     summary = inventory[0]
+    if summary.get("name") != GOVERNED_RULESET_NAME:
+        diagnostics.append("inventory name is not org-default-branch-protection")
+    if summary.get("target") != "branch":
+        diagnostics.append("inventory target is not branch")
     if summary.get("enforcement") != "active":
         diagnostics.append("inventory enforcement is not active")
     if summary.get("source") != GOVERNED_RULESET_SOURCE:
@@ -134,27 +201,21 @@ def evaluate_effective_rulesets(
         diagnostics.append("inventory source_type is not Organization")
 
     detail = details.get(GOVERNED_RULESET_ID)
-    if not isinstance(detail, dict):
-        diagnostics.append("detail response is unavailable")
-        detail = {}
-    retrieval_error = detail.get("_retrieval_error")
-    if isinstance(retrieval_error, str):
-        diagnostics.append(f"detail retrieval failed ({retrieval_error})")
-    bypass_actors = detail.get("bypass_actors")
-    if not isinstance(bypass_actors, list):
-        diagnostics.append("bypass actors were not disclosed")
-    elif bypass_actors:
-        diagnostics.append(f"{len(bypass_actors)} bypass actor(s) are present")
+    if not _exact_baseline_detail(detail):
+        diagnostics.append("baseline ruleset detail is not exact")
 
     observed_types: set[object] = set()
-    if not effective_rules:
-        diagnostics.append("no effective rule rows were disclosed")
-    for index, row in enumerate(effective_rules, start=1):
+    baseline_rows = [
+        (index, row)
+        for index, row in enumerate(effective_rules, start=1)
+        if isinstance(row, dict) and row.get("ruleset_id") == GOVERNED_RULESET_ID
+    ]
+    if not baseline_rows:
+        diagnostics.append("no effective baseline rule rows were disclosed")
+    for index, row in baseline_rows:
         if not isinstance(row, dict):
             diagnostics.append(f"effective row {index} is not an object")
             continue
-        if row.get("ruleset_id") != GOVERNED_RULESET_ID:
-            diagnostics.append(f"effective row {index} has a mixed ruleset id")
         if row.get("ruleset_source") != GOVERNED_RULESET_SOURCE:
             diagnostics.append(f"effective row {index} has a mixed or missing source")
         if row.get("ruleset_source_type") != GOVERNED_RULESET_SOURCE_TYPE:
@@ -165,6 +226,11 @@ def evaluate_effective_rulesets(
     missing_types = sorted(REQUIRED_RULE_TYPES - observed_types)
     if missing_types:
         diagnostics.append("missing effective rules: " + ", ".join(missing_types))
+    if len(baseline_rows) != len(REQUIRED_RULE_TYPES):
+        diagnostics.append("effective baseline rows are not an exact three-rule projection")
+    pull_rows = [row for _, row in baseline_rows if row.get("type") == "pull_request"]
+    if len(pull_rows) != 1 or pull_rows[0].get("parameters") != _exact_pull_request_parameters():
+        diagnostics.append("effective pull request parameters are not exact")
 
     if diagnostics:
         return [], [
@@ -189,9 +255,15 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
         )
 
     metadata = _request_json(f"{api_root}/repos/{repository}", token)
-    if not isinstance(metadata, dict) or metadata.get("default_branch") != "main":
-        raise RuntimeError("repository default branch is not main")
+    if not isinstance(metadata, dict) or (
+        metadata.get("id") != GOVERNED_REPOSITORY_ID
+        or metadata.get("full_name") != SOURCE_REPO
+        or metadata.get("default_branch") != "main"
+    ):
+        raise RuntimeError("repository identity/default branch is not exact")
     branch = _request_json(f"{api_root}/repos/{repository}/branches/main", token)
+    if not isinstance(branch, dict) or branch.get("protected") is not True:
+        raise RuntimeError("repository main branch is not protected")
     live_sha = exact_sha(
         ((branch if isinstance(branch, dict) else {}).get("commit") or {}).get("sha"),
         "current protected-main revision",
@@ -208,17 +280,14 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
         f"{api_root}/repos/{repository}/rules/branches/main", token
     )
     details: dict[int, object] = {}
-    if isinstance(summaries, list):
-        for summary in summaries:
-            ruleset_id = summary.get("id") if isinstance(summary, dict) else None
-            if not isinstance(ruleset_id, int):
-                continue
-            try:
-                details[ruleset_id] = _request_json(
-                    f"{api_root}/repos/{repository}/rulesets/{ruleset_id}", token
-                )
-            except Exception as error:
-                details[ruleset_id] = {"_retrieval_error": type(error).__name__}
+    try:
+        details[GOVERNED_RULESET_ID] = _request_json(
+            f"{api_root}/repos/{repository}/rulesets/{GOVERNED_RULESET_ID}", token
+        )
+    except Exception as error:
+        details[GOVERNED_RULESET_ID] = {
+            "_retrieval_error": type(error).__name__
+        }
     accepted, diagnostics = evaluate_effective_rulesets(
         summaries,
         details,
@@ -233,31 +302,6 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
         "status": "AUTHORIZED_EXACT_PROTECTED_MAIN",
         "source_revision": source_sha,
         "ruleset_ids": accepted,
-    }
-
-
-def require_exact_main_tip(source_sha: str) -> dict[str, object]:
-    """Read GitHub main after public HF readback and reject any source drift."""
-    source_sha = exact_sha(source_sha, "workflow source")
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    token = os.environ.get("GOVERNANCE_TOKEN", "")
-    api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
-    if repository != SOURCE_REPO:
-        raise RuntimeError(f"unexpected GitHub repository: {repository!r}")
-    if not token:
-        raise RuntimeError("GOVERNANCE_TOKEN is required for final main-tip readback")
-    branch = _request_json(f"{api_root}/repos/{repository}/branches/main", token)
-    live_sha = exact_sha(
-        ((branch if isinstance(branch, dict) else {}).get("commit") or {}).get("sha"),
-        "post-publication protected-main revision",
-    )
-    if live_sha != source_sha:
-        raise RuntimeError(
-            f"protected main drifted after publication: {live_sha} != {source_sha}"
-        )
-    return {
-        "status": "EXACT_MAIN_CONFIRMED_AFTER_PUBLIC_READBACK",
-        "source_revision": source_sha,
     }
 
 
@@ -334,7 +378,43 @@ def validate_bundle(bundle: Path, source_sha: str) -> dict[str, object]:
     return manifest
 
 
-def deploy_bundle(bundle: Path, source_sha: str, result_path: Path) -> dict[str, object]:
+def _recover_authoritative_revision(
+    bundle: Path,
+    manifest: dict[str, object],
+    previous_sha: str,
+    *,
+    deadline: float,
+) -> str | None:
+    """Return a post-exception revision only after authoritative exact-byte closure."""
+    info = _request_json_retry(
+        f"https://huggingface.co/api/spaces/{HF_REPO}",
+        deadline=deadline,
+        label="ambiguous-mutation authoritative revision readback",
+    )
+    if not isinstance(info, dict):
+        return None
+    candidate = exact_sha(info.get("sha"), "authoritative Hugging Face revision")
+    if candidate == previous_sha:
+        return None
+    _verify_exact_hf_revision(bundle, manifest, candidate, deadline=deadline)
+    return candidate
+
+
+def deploy_bundle(
+    bundle: Path,
+    source_sha: str,
+    result_path: Path,
+    mutation_state: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if mutation_state is None:
+        mutation_state = {}
+    mutation_state.update(
+        {
+            "upload_call_entered": False,
+            "authoritative_readback_attempted": False,
+            "known_hf_revision": None,
+        }
+    )
     source_sha = exact_sha(source_sha, "workflow source")
     manifest = validate_bundle(bundle, source_sha)
     authorization = require_governed_main(source_sha)
@@ -351,20 +431,36 @@ def deploy_bundle(bundle: Path, source_sha: str, result_path: Path) -> dict[str,
     mutation_authorization = require_governed_main(source_sha)
     if mutation_authorization != authorization:
         raise RuntimeError("protected-main authorization changed before publication")
-    commit = api.upload_folder(
-        repo_id=HF_REPO,
-        repo_type="space",
-        folder_path=bundle,
-        token=token,
-        parent_commit=before_sha,
-        delete_patterns="*",
-        commit_message=f"Deploy GitHub source {source_sha[:12]}",
-        commit_description=(
-            f"Source: https://github.com/{SOURCE_REPO}/commit/{source_sha}\n"
-            f"Bundle: {manifest['bundle_sha256']}"
-        ),
-    )
+    mutation_state["upload_call_entered"] = True
+    try:
+        commit = api.upload_folder(
+            repo_id=HF_REPO,
+            repo_type="space",
+            folder_path=bundle,
+            token=token,
+            parent_commit=before_sha,
+            delete_patterns="*",
+            commit_message=f"Deploy GitHub source {source_sha[:12]}",
+            commit_description=(
+                f"Source: https://github.com/{SOURCE_REPO}/commit/{source_sha}\n"
+                f"Bundle: {manifest['bundle_sha256']}"
+            ),
+        )
+    except Exception:
+        mutation_state["authoritative_readback_attempted"] = True
+        try:
+            recovered = _recover_authoritative_revision(
+                bundle,
+                manifest,
+                before_sha,
+                deadline=time.monotonic() + MUTATION_READBACK_SECONDS,
+            )
+        except Exception:
+            recovered = None
+        mutation_state["known_hf_revision"] = recovered
+        raise
     target_sha = exact_sha(commit.oid, "published Hugging Face revision")
+    mutation_state["known_hf_revision"] = target_sha
     result = {
         "schema": "szl.hf-deploy-result/v1",
         "status": "PUBLISHED_AWAITING_ATTESTATION",
@@ -411,6 +507,7 @@ def _public_bytes_once(
     expected_path: str,
     expected_query: str,
     max_redirects: int,
+    timeout: float = 45,
 ) -> tuple[int, bytes, str, int]:
     opener = urllib.request.build_opener(_NoRedirects())
     current = url
@@ -424,7 +521,7 @@ def _public_bytes_once(
         )
         request = urllib.request.Request(current, headers={"User-Agent": UA})
         try:
-            with opener.open(request, timeout=45) as response:
+            with opener.open(request, timeout=timeout) as response:
                 status = response.status
                 if status in TRANSIENT_HTTP_STATUS:
                     raise TransientReadError(f"HTTP {status}")
@@ -468,10 +565,108 @@ def _public_bytes(
             expected_path=expected_path,
             expected_query=expected_query,
             max_redirects=max_redirects,
+            timeout=_remaining_timeout(deadline, 45),
         ),
         deadline=deadline,
         label=label,
     )
+
+
+def _public_response_once(
+    url: str,
+    *,
+    allowed_origins: frozenset[str],
+    expected_path: str,
+    expected_query: str,
+    timeout: float,
+) -> tuple[int, bytes, str | None]:
+    _validate_readback_url(
+        url,
+        allowed_origins=allowed_origins,
+        expected_path=expected_path,
+        expected_query=expected_query,
+    )
+    opener = urllib.request.build_opener(_NoRedirects())
+    request = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = response.status
+            if status in TRANSIENT_HTTP_STATUS:
+                raise TransientReadError(f"HTTP {status}")
+            _validate_readback_url(
+                response.geturl(),
+                allowed_origins=allowed_origins,
+                expected_path=expected_path,
+                expected_query=expected_query,
+            )
+            return status, response.read(), response.headers.get("Location")
+    except urllib.error.HTTPError as error:
+        if error.code in TRANSIENT_HTTP_STATUS:
+            raise TransientReadError(f"HTTP {error.code}") from None
+        return error.code, error.read(), error.headers.get("Location")
+
+
+def _public_response(
+    url: str,
+    *,
+    deadline: float,
+    label: str,
+    allowed_origins: frozenset[str],
+    expected_path: str,
+    expected_query: str,
+) -> tuple[int, bytes, str | None]:
+    return _retry_transient(
+        lambda: _public_response_once(
+            url,
+            allowed_origins=allowed_origins,
+            expected_path=expected_path,
+            expected_query=expected_query,
+            timeout=_remaining_timeout(deadline, 45),
+        ),
+        deadline=deadline,
+        label=label,
+    )
+
+
+def _fetch_public_index(
+    origin: str,
+    source_sha: str,
+    expected_bytes: bytes,
+    *,
+    deadline: float,
+) -> bytes:
+    query = urllib.parse.urlencode({"source": exact_sha(source_sha, "workflow source")})
+    root_url = origin + "/?" + query
+    status, _, location = _public_response(
+        root_url,
+        deadline=deadline,
+        label="public root redirect readback",
+        allowed_origins=frozenset({origin}),
+        expected_path="/",
+        expected_query=query,
+    )
+    if status != 302 or not location:
+        raise RuntimeError("public root must return exactly one 302 redirect")
+    terminal_url = urllib.parse.urljoin(root_url, location)
+    _validate_readback_url(
+        terminal_url,
+        allowed_origins=frozenset({origin}),
+        expected_path="/index.html",
+        expected_query=query,
+    )
+    terminal_status, terminal_body, second_location = _public_response(
+        terminal_url,
+        deadline=deadline,
+        label="public index terminal readback",
+        allowed_origins=frozenset({origin}),
+        expected_path="/index.html",
+        expected_query=query,
+    )
+    if terminal_status != 200 or second_location is not None:
+        raise RuntimeError("public index must terminate at one redirect with status 200")
+    if terminal_body != expected_bytes:
+        raise RuntimeError("public index bytes differ from the bundled index")
+    return terminal_body
 
 
 def _static_origin() -> str:
@@ -480,41 +675,16 @@ def _static_origin() -> str:
     return f"https://{slug}.static.hf.space"
 
 
-def validate_public_provenance(provenance: object, source_sha: str) -> dict[str, object]:
-    source_sha = exact_sha(source_sha, "workflow source")
-    if not isinstance(provenance, dict):
-        raise RuntimeError("public static source identity is not an object")
-    source = provenance.get("source")
-    if not isinstance(source, dict):
-        raise RuntimeError("public static source identity source is not an object")
-    if (
-        provenance.get("schema") != "szl.deployment-source/v3"
-        or source.get("repository") != SOURCE_REPO
-        or source.get("commit") != source_sha
-        or source.get("relation") != SOURCE_RELATION
-    ):
-        raise RuntimeError("public static source identity did not close")
-    return provenance
-
-
-def attest_publication(
-    bundle: Path,
-    source_sha: str,
-    result_path: Path,
-    attestation_path: Path,
-    *,
-    timeout: int = ATTEST_TIMEOUT_SECONDS,
-) -> dict[str, object]:
-    source_sha = exact_sha(source_sha, "workflow source")
-    manifest = validate_bundle(bundle, source_sha)
-    result = json.loads(result_path.read_text(encoding="utf-8"))
-    if result.get("source_revision") != source_sha or result.get("target") != HF_REPO:
-        raise RuntimeError("deployment result is not bound to this source and target")
-    target_sha = exact_sha(result.get("hf_revision"), "deployment result revision")
-
-    deadline = time.monotonic() + timeout
-    last_stage = None
-    while time.monotonic() < deadline:
+def _wait_for_exact_running(target_sha: str, *, deadline: float) -> str:
+    target_sha = exact_sha(target_sha, "target Hugging Face revision")
+    last_stage: object = None
+    last_revision: str | None = None
+    while True:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"Space did not reach exact RUNNING revision {target_sha}; "
+                f"last revision={last_revision!r}; last stage={last_stage!r}"
+            )
         info = _request_json_retry(
             f"https://huggingface.co/api/spaces/{HF_REPO}",
             deadline=deadline,
@@ -522,25 +692,28 @@ def attest_publication(
         )
         if not isinstance(info, dict) or not isinstance(info.get("runtime"), dict):
             raise RuntimeError("Space runtime response is malformed")
-        live_sha = exact_sha(info.get("sha"), "runtime Hugging Face revision")
-        if live_sha != target_sha:
-            raise RuntimeError(
-                f"Space runtime revision differs: {live_sha} != {target_sha}"
-            )
+        last_revision = exact_sha(info.get("sha"), "runtime Hugging Face revision")
         last_stage = info["runtime"].get("stage")
+        if last_revision != target_sha:
+            time.sleep(min(10, max(0.0, deadline - time.monotonic())))
+            continue
         if last_stage == "RUNNING":
-            break
+            return "RUNNING"
         if last_stage in TERMINAL_STAGES:
             raise RuntimeError(f"Space reached {last_stage} at {target_sha}")
         if last_stage not in PENDING_STAGES:
             raise RuntimeError(f"Space runtime stage is unsupported: {last_stage!r}")
         time.sleep(min(10, max(0.0, deadline - time.monotonic())))
-    else:
-        raise RuntimeError(
-            f"Space did not reach exact RUNNING revision {target_sha}; "
-            f"last stage={last_stage!r}"
-        )
 
+
+def _verify_exact_hf_revision(
+    bundle: Path,
+    manifest: dict[str, object],
+    target_sha: str,
+    *,
+    deadline: float,
+) -> list[dict[str, object]]:
+    target_sha = exact_sha(target_sha, "Hugging Face revision")
     tree = _request_json_retry(
         f"https://huggingface.co/api/spaces/{HF_REPO}/tree/{target_sha}"
         "?recursive=true&expand=false",
@@ -552,7 +725,9 @@ def attest_publication(
     live_paths = {
         row["path"]
         for row in tree
-        if isinstance(row, dict) and row.get("type") == "file"
+        if isinstance(row, dict)
+        and row.get("type") == "file"
+        and isinstance(row.get("path"), str)
     }
     expected_paths = {
         path.relative_to(bundle).as_posix()
@@ -607,21 +782,58 @@ def attest_publication(
                 "sha256": row["sha256"],
             }
         )
+    return verified_tree
+
+
+def validate_public_provenance(provenance: object, source_sha: str) -> dict[str, object]:
+    source_sha = exact_sha(source_sha, "workflow source")
+    if not isinstance(provenance, dict):
+        raise RuntimeError("public static source identity is not an object")
+    source = provenance.get("source")
+    if not isinstance(source, dict):
+        raise RuntimeError("public static source identity source is not an object")
+    if (
+        provenance.get("schema") != "szl.deployment-source/v3"
+        or source.get("repository") != SOURCE_REPO
+        or source.get("commit") != source_sha
+        or source.get("relation") != SOURCE_RELATION
+    ):
+        raise RuntimeError("public static source identity did not close")
+    return provenance
+
+
+def attest_publication(
+    bundle: Path,
+    source_sha: str,
+    result_path: Path,
+    attestation_path: Path,
+    *,
+    timeout: int = ATTEST_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    source_sha = exact_sha(source_sha, "workflow source")
+    manifest = validate_bundle(bundle, source_sha)
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    if result.get("source_revision") != source_sha or result.get("target") != HF_REPO:
+        raise RuntimeError("deployment result is not bound to this source and target")
+    target_sha = exact_sha(result.get("hf_revision"), "deployment result revision")
+
+    deadline = time.monotonic() + timeout
+    runtime_stage = _wait_for_exact_running(target_sha, deadline=deadline)
+    verified_tree = _verify_exact_hf_revision(
+        bundle,
+        manifest,
+        target_sha,
+        deadline=deadline,
+    )
 
     origin = _static_origin()
     query = urllib.parse.urlencode({"source": source_sha})
-    ui_url = origin + "/?" + query
-    ui_status, ui_body, _, _ = _public_bytes(
-        ui_url,
+    _fetch_public_index(
+        origin,
+        source_sha,
+        (bundle / "index.html").read_bytes(),
         deadline=deadline,
-        label="public index readback",
-        allowed_origins=frozenset({origin}),
-        expected_path="/",
-        expected_query=query,
-        max_redirects=1,
     )
-    if ui_status != 200 or ui_body != (bundle / "index.html").read_bytes():
-        raise RuntimeError("public index bytes differ from the bundled index")
 
     bundled_provenance_bytes = (bundle / "SPACE_PROVENANCE.json").read_bytes()
     try:
@@ -632,30 +844,33 @@ def attest_publication(
     if bundled_provenance_bytes != canonical_provenance_bytes:
         raise RuntimeError("bundled provenance is not canonical JSON")
     provenance_url = origin + "/SPACE_PROVENANCE.json?" + query
-    provenance_status, provenance_body, _, _ = _public_bytes(
+    provenance_status, provenance_body, provenance_location = _public_response(
         provenance_url,
         deadline=deadline,
         label="public provenance readback",
         allowed_origins=frozenset({origin}),
         expected_path="/SPACE_PROVENANCE.json",
         expected_query=query,
-        max_redirects=1,
     )
-    if provenance_status != 200 or provenance_body != canonical_provenance_bytes:
+    if (
+        provenance_status != 200
+        or provenance_location is not None
+        or provenance_body != canonical_provenance_bytes
+    ):
         raise RuntimeError("public provenance bytes differ from the canonical bundle")
     provenance = validate_public_provenance(
         json.loads(provenance_body),
         source_sha,
     )
 
-    post_publication_main = require_exact_main_tip(source_sha)
+    post_publication_main = require_governed_main(source_sha)
 
     attestation = {
         "schema": "szl.hf-live-attestation/v2",
         "status": "MEASURED",
         "source_revision": source_sha,
         "hf_revision": target_sha,
-        "runtime_stage": "RUNNING",
+        "runtime_stage": runtime_stage,
         "bundle_sha256": manifest["bundle_sha256"],
         "file_count": len(verified_tree),
         "tree_sha256": hashlib.sha256(canonical_json(verified_tree)).hexdigest(),
@@ -679,10 +894,25 @@ def attest_publication(
 
 
 def write_failure_evidence(
-    path: Path, source_sha: str, error: Exception, result_path: Path
+    path: Path,
+    source_sha: str,
+    error: Exception,
+    result_path: Path,
+    mutation_state: dict[str, object] | None = None,
 ) -> None:
-    published_revision = None
-    if result_path.is_file():
+    upload_call_entered = bool(
+        mutation_state and mutation_state.get("upload_call_entered") is True
+    )
+    authoritative_readback_attempted = bool(
+        mutation_state
+        and mutation_state.get("authoritative_readback_attempted") is True
+    )
+    published_revision = (
+        mutation_state.get("known_hf_revision") if mutation_state else None
+    )
+    if not (isinstance(published_revision, str) and HEX40.fullmatch(published_revision)):
+        published_revision = None
+    if mutation_state is None and result_path.is_file():
         try:
             candidate = json.loads(result_path.read_text(encoding="utf-8")).get(
                 "hf_revision"
@@ -691,18 +921,23 @@ def write_failure_evidence(
                 published_revision = candidate
         except (OSError, json.JSONDecodeError):
             pass
+    if published_revision:
+        status = "PARTIAL_AFTER_MUTATION"
+    elif upload_call_entered:
+        status = "MUTATION_OUTCOME_UNKNOWN"
+    else:
+        status = "FAILED_BEFORE_MUTATION"
     message = re.sub(r"hf_[A-Za-z0-9]+", "[REDACTED]", str(error))[:1000]
     path.write_bytes(
         canonical_json(
             {
                 "schema": "szl.hf-deploy-failure/v2",
-                "status": (
-                    "PARTIAL_AFTER_MUTATION"
-                    if published_revision
-                    else "FAILED_BEFORE_MUTATION"
-                ),
+                "status": status,
                 "receipt_minted": False,
                 "measured": False,
+                "deployment_success": False,
+                "upload_call_entered": upload_call_entered,
+                "authoritative_readback_attempted": authoritative_readback_attempted,
                 "source_repository": SOURCE_REPO,
                 "source_revision": source_sha,
                 "source_relation": SOURCE_RELATION,
@@ -715,7 +950,84 @@ def write_failure_evidence(
     )
 
 
+def write_workflow_stage_failure(
+    path: Path,
+    source_sha: str,
+    result_path: Path,
+    receipt_path: Path,
+    *,
+    failure_stage: str,
+    artifact_outcome: str,
+    oidc_outcome: str,
+) -> dict[str, object]:
+    source_sha = exact_sha(source_sha, "workflow source")
+    if failure_stage not in {"SUCCESS_ARTIFACT_UPLOAD", "OIDC_RECEIPT_ATTESTATION"}:
+        raise RuntimeError("workflow receipt failure stage is not supported")
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    hf_revision = exact_sha(result.get("hf_revision"), "deployment result revision")
+    if (
+        result.get("source_revision") != source_sha
+        or result.get("target") != HF_REPO
+        or receipt.get("status") != "MEASURED"
+        or receipt.get("source_revision") != source_sha
+        or receipt.get("hf_revision") != hf_revision
+        or receipt.get("target") != HF_REPO
+        or receipt.get("source")
+        != {
+            "repository": SOURCE_REPO,
+            "revision": source_sha,
+            "relation": SOURCE_RELATION,
+        }
+    ):
+        raise RuntimeError("local measured receipt is not exactly source-bound")
+    evidence = {
+        "schema": "szl.hf-receipt-stage-failure/v1",
+        "status": "FAILED_AFTER_LOCAL_MEASUREMENT",
+        "failure_stage": failure_stage,
+        "deployment_success": False,
+        "receipt_minted": False,
+        "source_repository": SOURCE_REPO,
+        "source_revision": source_sha,
+        "source_relation": SOURCE_RELATION,
+        "hf_revision": hf_revision,
+        "target": HF_REPO,
+        "artifact_upload_outcome": artifact_outcome,
+        "oidc_attestation_outcome": oidc_outcome,
+        "local_measured_receipt_sha256": hashlib.sha256(
+            receipt_path.read_bytes()
+        ).hexdigest(),
+    }
+    path.write_bytes(canonical_json(evidence))
+    return evidence
+
+
+def stage_failure_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--failure-evidence", type=Path, required=True)
+    parser.add_argument("--failure-stage", required=True)
+    parser.add_argument("--artifact-outcome", required=True)
+    parser.add_argument("--oidc-outcome", required=True)
+    args = parser.parse_args(argv)
+    evidence = write_workflow_stage_failure(
+        args.failure_evidence,
+        args.source_sha,
+        args.result,
+        args.receipt,
+        failure_stage=args.failure_stage,
+        artifact_outcome=args.artifact_outcome,
+        oidc_outcome=args.oidc_outcome,
+    )
+    print(json.dumps(evidence, sort_keys=True))
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "stage-failure":
+        return stage_failure_main(sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
@@ -724,8 +1036,9 @@ def main() -> int:
     parser.add_argument("--failure-evidence", type=Path, required=True)
     args = parser.parse_args()
     source_sha = exact_sha(args.source_sha, "workflow source")
+    mutation_state: dict[str, object] = {}
     try:
-        deploy_bundle(args.bundle, source_sha, args.result)
+        deploy_bundle(args.bundle, source_sha, args.result, mutation_state)
         attestation = attest_publication(
             args.bundle,
             source_sha,
@@ -738,6 +1051,7 @@ def main() -> int:
             source_sha,
             error,
             args.result,
+            mutation_state,
         )
         raise
     print(json.dumps(attestation, sort_keys=True))

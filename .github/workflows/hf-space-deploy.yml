@@ -86,7 +86,8 @@ jobs:
           )"
           test "$live_sha" = "$GITHUB_SHA"
           printf 'Protected main remains exact at %s\n' "$live_sha"
-      - name: Publish exact protected-main bundle
+      - name: Publish and measure exact protected-main bundle
+        id: publish-measure
         env:
           GOVERNANCE_TOKEN: ${{ steps.governance-token.outputs.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -99,11 +100,10 @@ jobs:
             --result "$RUNNER_TEMP/hf-deploy-result.json" \
             --attestation "$RUNNER_TEMP/hf-live-attestation.json" \
             --failure-evidence "$RUNNER_TEMP/hf-deploy-failure.json"
-      - name: Attest final exact-revision receipt
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
-        with:
-          subject-path: ${{ runner.temp }}/hf-live-attestation.json
-      - name: Upload required successful deployment evidence
+      - name: Upload locally measured deployment evidence
+        id: success-artifact
+        if: steps.publish-measure.outcome == 'success'
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hf-space-deployment-evidence
@@ -114,8 +114,44 @@ jobs:
             ${{ runner.temp }}/hf-live-attestation.json
           if-no-files-found: error
           retention-days: 90
+      - name: Attest final exact-revision receipt
+        id: oidc-receipt
+        if: steps.publish-measure.outcome == 'success' && steps.success-artifact.outcome == 'success'
+        continue-on-error: true
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ${{ runner.temp }}/hf-live-attestation.json
+      - name: Synthesize receipt-stage failure evidence
+        id: receipt-stage-failure
+        if: >-
+          always() && steps.publish-measure.outcome == 'success' &&
+          (steps.success-artifact.outcome != 'success' || steps.oidc-receipt.outcome != 'success')
+        shell: bash
+        run: |
+          failure_stage="OIDC_RECEIPT_ATTESTATION"
+          if [ "${{ steps.success-artifact.outcome }}" != "success" ]; then
+            failure_stage="SUCCESS_ARTIFACT_UPLOAD"
+          fi
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py stage-failure \
+            --source-sha "$GITHUB_SHA" \
+            --result "$RUNNER_TEMP/hf-deploy-result.json" \
+            --receipt "$RUNNER_TEMP/hf-live-attestation.json" \
+            --failure-evidence "$RUNNER_TEMP/hf-receipt-stage-failure.json" \
+            --failure-stage "$failure_stage" \
+            --artifact-outcome "${{ steps.success-artifact.outcome }}" \
+            --oidc-outcome "${{ steps.oidc-receipt.outcome }}"
+      - name: Upload receipt-stage failure evidence
+        id: receipt-stage-failure-artifact
+        if: always() && steps.receipt-stage-failure.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hf-space-receipt-stage-failure
+          path: ${{ runner.temp }}/hf-receipt-stage-failure.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Upload separate failed-deployment evidence
-        if: failure()
+        if: always() && steps.publish-measure.outcome == 'failure'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hf-space-deployment-failure
@@ -125,3 +161,10 @@ jobs:
             ${{ runner.temp }}/hf-live-attestation.json
           if-no-files-found: warn
           retention-days: 90
+      - name: Enforce terminal publication evidence
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.publish-measure.outcome }}" = "success"
+          test "${{ steps.success-artifact.outcome }}" = "success"
+          test "${{ steps.oidc-receipt.outcome }}" = "success"

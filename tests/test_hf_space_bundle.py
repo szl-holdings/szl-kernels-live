@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 from html.parser import HTMLParser
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,20 +20,86 @@ from scripts.deploy_hf_space import (
     RetryExhausted,
     SOURCE_RELATION,
     SOURCE_REPO,
+    _fetch_public_index,
     _public_bytes,
-    _public_bytes_once,
+    _request_json_retry,
     _static_origin,
+    _wait_for_exact_running,
     attest_publication,
     canonical_json,
+    deploy_bundle,
     evaluate_effective_rulesets,
     require_governed_main,
     validate_bundle,
     validate_public_provenance,
     write_failure_evidence,
+    write_workflow_stage_failure,
 )
 
 
 SOURCE_SHA = "a" * 40
+TARGET_SHA = "b" * 40
+PARENT_SHA = "c" * 40
+
+
+def baseline_summary() -> dict[str, object]:
+    return {
+        "id": GOVERNED_RULESET_ID,
+        "name": "org-default-branch-protection",
+        "target": "branch",
+        "source": "szl-holdings",
+        "source_type": "Organization",
+        "enforcement": "active",
+    }
+
+
+def pull_request_parameters() -> dict[str, object]:
+    return {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": True,
+        "required_reviewers": [],
+        "require_code_owner_review": False,
+        "require_last_push_approval": False,
+        "required_review_thread_resolution": True,
+        "allowed_merge_methods": ["squash", "rebase"],
+    }
+
+
+def baseline_ruleset() -> dict[str, object]:
+    return {
+        **baseline_summary(),
+        "bypass_actors": [],
+        "conditions": {
+            "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]},
+            "repository_name": {"exclude": [], "include": ["~ALL"]},
+        },
+        "rules": [
+            {"type": "pull_request", "parameters": pull_request_parameters()},
+            {"type": "non_fast_forward"},
+            {"type": "required_linear_history"},
+        ],
+    }
+
+
+def baseline_effective() -> list[dict[str, object]]:
+    return [
+        {
+            "type": "pull_request",
+            "parameters": pull_request_parameters(),
+            "ruleset_id": GOVERNED_RULESET_ID,
+            "ruleset_source": "szl-holdings",
+            "ruleset_source_type": "Organization",
+        },
+        *[
+            {
+                "type": rule_type,
+                "ruleset_id": GOVERNED_RULESET_ID,
+                "ruleset_source": "szl-holdings",
+                "ruleset_source_type": "Organization",
+            }
+            for rule_type in ("non_fast_forward", "required_linear_history")
+        ],
+    ]
 
 
 class LinkCollector(HTMLParser):
@@ -234,17 +302,28 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             '--failure-evidence "$RUNNER_TEMP/hf-deploy-failure.json"', workflow
         )
         publish = workflow.index(publisher_command)
+        success_evidence = workflow.index(
+            "Upload locally measured deployment evidence"
+        )
         final_attestation = workflow.index("Attest final exact-revision receipt")
         final_subject = workflow.index(
             "subject-path: ${{ runner.temp }}/hf-live-attestation.json"
         )
-        success_evidence = workflow.index(
-            "Upload required successful deployment evidence"
-        )
-        self.assertLess(publish, final_attestation)
+        stage_failure = workflow.index("Synthesize receipt-stage failure evidence")
+        terminal_gate = workflow.index("Enforce terminal publication evidence")
+        self.assertLess(publish, success_evidence)
+        self.assertLess(success_evidence, final_attestation)
         self.assertLess(final_attestation, final_subject)
-        self.assertLess(final_subject, success_evidence)
+        self.assertLess(final_subject, stage_failure)
+        self.assertLess(stage_failure, terminal_gate)
         self.assertEqual(workflow.count("actions/attest-build-provenance@"), 2)
+        self.assertIn("id: publish-measure", workflow)
+        self.assertIn("id: success-artifact", workflow)
+        self.assertIn("id: oidc-receipt", workflow)
+        self.assertIn("continue-on-error: true", workflow)
+        self.assertIn("stage-failure", workflow)
+        self.assertIn("hf-space-receipt-stage-failure", workflow)
+        self.assertIn('test "${{ steps.oidc-receipt.outcome }}" = "success"', workflow)
         self.assertIn("if-no-files-found: error", workflow)
         self.assertIn("Upload separate failed-deployment evidence", workflow)
         self.assertIn("hf-space-deployment-failure", workflow)
@@ -275,68 +354,51 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             )
         self.assertEqual(lock.lower().count("huggingface_hub=="), 1)
 
-    def test_inherited_projected_ruleset_is_bound_to_effective_main(self) -> None:
-        summaries = [
-            {
-                "id": GOVERNED_RULESET_ID,
-                "name": "org-default-branch-protection",
-                "source": "szl-holdings",
-                "source_type": "Organization",
-                "enforcement": "active",
-            }
-        ]
-        details = {
-            GOVERNED_RULESET_ID: {
-                "id": GOVERNED_RULESET_ID,
-                "bypass_actors": [],
-            }
-        }
-        effective = [
-            {
-                "type": rule_type,
-                "ruleset_id": GOVERNED_RULESET_ID,
-                "ruleset_source": "szl-holdings",
-                "ruleset_source_type": "Organization",
-            }
-            for rule_type in (
-                "pull_request",
-                "non_fast_forward",
-                "required_linear_history",
-            )
-        ]
+        contracts_workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "kernel-contracts.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(contracts_workflow.count('python-version: "3.12.13"'), 2)
+        self.assertNotIn('python-version: "3.11"', contracts_workflow)
+        self.assertIn("Prove clean hash-locked publisher runtime", contracts_workflow)
+        self.assertIn("python -I -P -m venv", contracts_workflow)
+        self.assertIn("--require-hashes", contracts_workflow)
+        self.assertIn("--only-binary=:all:", contracts_workflow)
+        self.assertIn("--ignore-installed", contracts_workflow)
+        self.assertIn(
+            'huggingface_hub.__version__ == "1.19.0"', contracts_workflow
+        )
 
+    def test_inherited_projected_ruleset_is_bound_to_effective_main(self) -> None:
         accepted, diagnostics = evaluate_effective_rulesets(
-            summaries,
-            details,
-            effective,
+            [baseline_summary()],
+            {GOVERNED_RULESET_ID: baseline_ruleset()},
+            baseline_effective()
+            + [
+                {
+                    "type": "required_workflows",
+                    "ruleset_id": 999,
+                    "ruleset_source": "szl-holdings",
+                    "ruleset_source_type": "Organization",
+                }
+            ],
         )
 
         self.assertEqual(accepted, [GOVERNED_RULESET_ID])
         self.assertEqual(diagnostics, [])
 
     def test_policy_rejections_are_candidate_specific_and_secret_free(self) -> None:
-        summary = {
-            "id": GOVERNED_RULESET_ID,
-            "source": "szl-holdings",
-            "source_type": "Organization",
-            "enforcement": "active",
-        }
-        details = {GOVERNED_RULESET_ID: {"bypass_actors": []}}
-        effective = [
-            {
-                "type": rule_type,
-                "ruleset_id": GOVERNED_RULESET_ID,
-                "ruleset_source": "szl-holdings",
-                "ruleset_source_type": "Organization",
-            }
-            for rule_type in REQUIRED_RULE_TYPES_FOR_TEST
-        ]
+        summary = baseline_summary()
+        details = {GOVERNED_RULESET_ID: baseline_ruleset()}
+        effective = baseline_effective()
         mutations = (
             ("missing inventory source", [{k: v for k, v in summary.items() if k != "source"}], effective),
             ("wrong inventory source_type", [{**summary, "source_type": "Repository"}], effective),
-            ("mixed row id", [summary], [{**effective[0], "ruleset_id": 9}, *effective[1:]]),
             ("missing row source", [summary], [{k: v for k, v in effective[0].items() if k != "ruleset_source"}, *effective[1:]]),
             ("mixed row source_type", [summary], [{**effective[0], "ruleset_source_type": "Repository"}, *effective[1:]]),
+            ("wrong pull request parameters", [summary], [{**effective[0], "parameters": {**pull_request_parameters(), "required_approving_review_count": 1}}, *effective[1:]]),
         )
         for label, summaries, rows in mutations:
             with self.subTest(label=label):
@@ -347,38 +409,37 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 self.assertTrue(diagnostics)
                 self.assertNotIn("test-token", " | ".join(diagnostics))
 
+        detail_mutations = (
+            ("wrong name", {**baseline_ruleset(), "name": "other"}),
+            ("wrong target", {**baseline_ruleset(), "target": "tag"}),
+            ("bypass", {**baseline_ruleset(), "bypass_actors": [{"actor_id": 1}]}),
+            ("exclusion", {**baseline_ruleset(), "conditions": {**baseline_ruleset()["conditions"], "ref_name": {"exclude": ["refs/heads/dev"], "include": ["~DEFAULT_BRANCH"]}}}),
+        )
+        for label, detail in detail_mutations:
+            with self.subTest(label=label):
+                accepted, diagnostics = evaluate_effective_rulesets(
+                    [summary], {GOVERNED_RULESET_ID: detail}, effective
+                )
+                self.assertEqual(accepted, [])
+                self.assertTrue(diagnostics)
+
     def test_in_process_guard_requires_exact_effective_no_bypass_main(self) -> None:
         def response(url: str, _token: str = "") -> object:
             self.assertEqual(_token, "test-token")
             if url.endswith("/repos/szl-holdings/szl-kernels-live"):
-                return {"default_branch": "main"}
+                return {
+                    "id": 1295941334,
+                    "full_name": SOURCE_REPO,
+                    "default_branch": "main",
+                }
             if url.endswith("/rulesets?includes_parents=true"):
-                return [
-                    {
-                        "id": GOVERNED_RULESET_ID,
-                        "enforcement": "active",
-                        "source": "szl-holdings",
-                        "source_type": "Organization",
-                    }
-                ]
+                return [baseline_summary()]
             if url.endswith("/rules/branches/main"):
-                return [
-                    {
-                        "type": rule_type,
-                        "ruleset_id": GOVERNED_RULESET_ID,
-                        "ruleset_source": "szl-holdings",
-                        "ruleset_source_type": "Organization",
-                    }
-                    for rule_type in (
-                        "pull_request",
-                        "non_fast_forward",
-                        "required_linear_history",
-                    )
-                ]
+                return baseline_effective()
             if url.endswith("/branches/main"):
-                return {"commit": {"sha": SOURCE_SHA}}
+                return {"protected": True, "commit": {"sha": SOURCE_SHA}}
             if url.endswith(f"/rulesets/{GOVERNED_RULESET_ID}"):
-                return {"bypass_actors": []}
+                return baseline_ruleset()
             raise AssertionError(url)
 
         environment = {
@@ -395,15 +456,15 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 authorization["ruleset_ids"], [GOVERNED_RULESET_ID]
             )
 
-        def undisclosed(url: str, token: str = "") -> object:
+        def weakened(url: str, token: str = "") -> object:
             value = response(url, token)
             if url.endswith(f"/rulesets/{GOVERNED_RULESET_ID}"):
-                value.pop("bypass_actors")
+                value["bypass_actors"] = [{"actor_id": 1}]
             return value
 
         with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
-            "scripts.deploy_hf_space._request_json", side_effect=undisclosed
-        ), self.assertRaisesRegex(RuntimeError, "bypass actors were not disclosed"):
+            "scripts.deploy_hf_space._request_json", side_effect=weakened
+        ), self.assertRaisesRegex(RuntimeError, "baseline ruleset detail is not exact"):
             require_governed_main(SOURCE_SHA)
 
     def test_in_process_guard_rejects_empty_governance_token_before_api(self) -> None:
@@ -422,21 +483,61 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             require_governed_main(SOURCE_SHA)
         request_json.assert_not_called()
 
+    def _public_readback_mocks(
+        self, bundle: Path, target_sha: str
+    ) -> tuple[object, object]:
+        expected_paths = {
+            path.relative_to(bundle).as_posix()
+            for path in bundle.rglob("*")
+            if path.is_file()
+        }
+
+        def hf_json(url: str, **_kwargs) -> object:
+            if "/tree/" in url:
+                return [
+                    {"type": "file", "path": path}
+                    for path in sorted(expected_paths | {".gitattributes"})
+                ]
+            return {"sha": target_sha, "runtime": {"stage": "RUNNING"}}
+
+        def public_bytes(url: str, **_kwargs) -> tuple[int, bytes, str, int]:
+            if "/resolve/" not in url:
+                raise AssertionError(url)
+            marker = f"/resolve/{target_sha}/"
+            relative = urllib.parse.unquote(url.split(marker, 1)[1])
+            return 200, (bundle / relative).read_bytes(), url, 0
+
+        def public_response(
+            url: str, **_kwargs
+        ) -> tuple[int, bytes, str | None]:
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.path == "/":
+                return 302, b"", "/index.html?" + parsed.query
+            if parsed.path == "/index.html":
+                return 200, (bundle / "index.html").read_bytes(), None
+            if parsed.path == "/SPACE_PROVENANCE.json":
+                return (
+                    200,
+                    (bundle / "SPACE_PROVENANCE.json").read_bytes(),
+                    None,
+                )
+            raise AssertionError(url)
+
+        return (hf_json, public_bytes, public_response)
+
     def test_public_attestation_binds_exact_revision_bytes_and_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / "bundle"
             build_bundle(bundle, SOURCE_SHA)
-            target_sha = "b" * 40
             result = Path(temporary) / "result.json"
-            result.write_text(
-                json.dumps(
+            result.write_bytes(
+                canonical_json(
                     {
                         "source_revision": SOURCE_SHA,
                         "target": HF_REPO,
-                        "hf_revision": target_sha,
+                        "hf_revision": TARGET_SHA,
                     }
-                ),
-                encoding="utf-8",
+                )
             )
             attestation = Path(temporary) / "attestation.json"
             runtime_provenance = json.loads(
@@ -447,36 +548,26 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 for path in bundle.rglob("*")
                 if path.is_file()
             }
-
-            def hf_json(url: str, _token: str = "") -> object:
-                if url.endswith("/repos/szl-holdings/szl-kernels-live/branches/main"):
-                    return {"commit": {"sha": SOURCE_SHA}}
-                if "/tree/" in url:
-                    return [
-                        {"type": "file", "path": path}
-                        for path in sorted(expected_paths | {".gitattributes"})
-                    ]
-                return {"sha": target_sha, "runtime": {"stage": "RUNNING"}}
-
-            def public_bytes(url: str, **_kwargs) -> tuple[int, bytes, str, int]:
-                if "/resolve/" in url:
-                    marker = f"/resolve/{target_sha}/"
-                    relative = urllib.parse.unquote(url.split(marker, 1)[1])
-                    return 200, (bundle / relative).read_bytes(), url, 0
-                if "SPACE_PROVENANCE.json" in url:
-                    return 200, (bundle / "SPACE_PROVENANCE.json").read_bytes(), url, 0
-                return 200, (bundle / "index.html").read_bytes(), url, 0
-
-            environment = {
-                "GITHUB_REPOSITORY": SOURCE_REPO,
-                "GITHUB_REF": "refs/heads/main",
-                "GOVERNANCE_TOKEN": "test-token",
-                "GITHUB_API_URL": "https://api.github.test",
+            hf_json, public_bytes, public_response = self._public_readback_mocks(
+                bundle, TARGET_SHA
+            )
+            final_guard = {
+                "status": "AUTHORIZED_EXACT_PROTECTED_MAIN",
+                "source_revision": SOURCE_SHA,
+                "ruleset_ids": [GOVERNED_RULESET_ID],
             }
-            with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
-                "scripts.deploy_hf_space._request_json", side_effect=hf_json
+            with mock.patch(
+                "scripts.deploy_hf_space._request_json_retry",
+                side_effect=hf_json,
             ), mock.patch(
-                "scripts.deploy_hf_space._public_bytes", side_effect=public_bytes
+                "scripts.deploy_hf_space._public_bytes",
+                side_effect=public_bytes,
+            ), mock.patch(
+                "scripts.deploy_hf_space._public_response",
+                side_effect=public_response,
+            ), mock.patch(
+                "scripts.deploy_hf_space.require_governed_main",
+                return_value=final_guard,
             ):
                 evidence = attest_publication(
                     bundle,
@@ -485,13 +576,15 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     attestation,
                     timeout=1,
                 )
+
             self.assertEqual(evidence["schema"], "szl.hf-live-attestation/v2")
             self.assertEqual(evidence["status"], "MEASURED")
-            self.assertEqual(evidence["hf_revision"], target_sha)
+            self.assertEqual(evidence["hf_revision"], TARGET_SHA)
             self.assertEqual(evidence["source_revision"], SOURCE_SHA)
             self.assertEqual(evidence["target"], HF_REPO)
             self.assertEqual(evidence["runtime_stage"], "RUNNING")
             self.assertEqual(evidence["file_count"], len(expected_paths))
+            self.assertEqual(evidence["post_publication_main"], final_guard)
             self.assertRegex(evidence["bundle_sha256"], r"^[0-9a-f]{64}$")
             self.assertRegex(evidence["tree_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(
@@ -525,68 +618,80 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             )
             for label, field, value in invalid_sources:
                 with self.subTest(label=label):
-                    runtime_provenance = json.loads(
-                        (bundle / "SPACE_PROVENANCE.json").read_text(
-                            encoding="utf-8"
-                        )
-                    )
+                    candidate = json.loads(json.dumps(runtime_provenance))
                     if value is None:
-                        runtime_provenance["source"].pop(field)
+                        candidate["source"].pop(field)
                     else:
-                        runtime_provenance["source"][field] = value
+                        candidate["source"][field] = value
                     with self.assertRaisesRegex(
                         RuntimeError, "public static source identity did not close"
                     ):
-                        validate_public_provenance(runtime_provenance, SOURCE_SHA)
+                        validate_public_provenance(candidate, SOURCE_SHA)
 
-    def test_public_redirect_and_exact_byte_contracts_fail_closed(self) -> None:
+    def test_public_root_requires_one_exact_302_then_terminal_200_bytes(self) -> None:
         origin = _static_origin()
         query = urllib.parse.urlencode({"source": SOURCE_SHA})
-        url = origin + "/?" + query
+        exact_location = origin + "/index.html?" + query
+        expected = b"exact-index"
 
-        def redirect(location: str) -> urllib.error.HTTPError:
-            return urllib.error.HTTPError(
-                url,
-                302,
-                "Found",
-                {"Location": location},
-                None,
+        with mock.patch(
+            "scripts.deploy_hf_space._public_response",
+            side_effect=[
+                (302, b"", exact_location),
+                (200, expected, None),
+            ],
+        ):
+            self.assertEqual(
+                _fetch_public_index(
+                    origin,
+                    SOURCE_SHA,
+                    expected,
+                    deadline=float("inf"),
+                ),
+                expected,
             )
 
-        for label, location in (
-            ("wrong origin", "https://example.test/?" + query),
-            ("wrong path", origin + "/other?" + query),
-            ("wrong query", origin + "/?source=" + "b" * 40),
-        ):
-            opener = mock.Mock()
-            opener.open.side_effect = redirect(location)
+        failures = (
+            ("direct root 200", [(200, expected, None)], "exactly one 302"),
+            (
+                "wrong origin",
+                [(302, b"", "https://example.test/index.html?" + query)],
+                "unapproved origin",
+            ),
+            (
+                "wrong path",
+                [(302, b"", origin + "/other?" + query)],
+                "requested path",
+            ),
+            (
+                "wrong query",
+                [(302, b"", origin + "/index.html?source=" + TARGET_SHA)],
+                "requested query",
+            ),
+            (
+                "second redirect",
+                [(302, b"", exact_location), (302, b"", exact_location)],
+                "terminate at one redirect",
+            ),
+            (
+                "wrong bytes",
+                [(302, b"", exact_location), (200, b"wrong", None)],
+                "bytes differ",
+            ),
+        )
+        for label, responses, message in failures:
             with self.subTest(label=label), mock.patch(
-                "scripts.deploy_hf_space.urllib.request.build_opener",
-                return_value=opener,
-            ), self.assertRaisesRegex(RuntimeError, "public readback redirect"):
-                _public_bytes_once(
-                    url,
-                    allowed_origins=frozenset({origin}),
-                    expected_path="/",
-                    expected_query=query,
-                    max_redirects=1,
+                "scripts.deploy_hf_space._public_response",
+                side_effect=responses,
+            ), self.assertRaisesRegex(RuntimeError, message):
+                _fetch_public_index(
+                    origin,
+                    SOURCE_SHA,
+                    expected,
+                    deadline=float("inf"),
                 )
 
-        opener = mock.Mock()
-        opener.open.side_effect = redirect(origin + "/?" + query)
-        with mock.patch(
-            "scripts.deploy_hf_space.urllib.request.build_opener",
-            return_value=opener,
-        ), self.assertRaisesRegex(RuntimeError, "redirect limit exceeded"):
-            _public_bytes_once(
-                url,
-                allowed_origins=frozenset({origin}),
-                expected_path="/",
-                expected_query=query,
-                max_redirects=0,
-            )
-
-    def test_transient_public_readback_retries_and_exhausts_safely(self) -> None:
+    def test_transient_reads_are_bounded_and_all_5xx_retry(self) -> None:
         origin = _static_origin()
         attempts = [ConnectionResetError(), (200, b"ok", origin + "/", 0)]
         with mock.patch(
@@ -599,17 +704,18 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 allowed_origins=frozenset({origin}),
                 expected_path="/",
                 expected_query="",
-                max_redirects=1,
+                max_redirects=0,
             )
         self.assertEqual(response[0:2], (200, b"ok"))
 
         with mock.patch(
             "scripts.deploy_hf_space._public_bytes_once",
             side_effect=urllib.error.HTTPError(
-                origin, 503, "Unavailable", {}, None
+                origin, 599, "Unavailable", {}, None
             ),
         ), mock.patch(
-            "scripts.deploy_hf_space.time.monotonic", side_effect=(0.0, 2.0)
+            "scripts.deploy_hf_space.time.monotonic",
+            side_effect=(0.0, 0.0, 2.0),
         ), self.assertRaises(RetryExhausted):
             _public_bytes(
                 origin + "/",
@@ -618,72 +724,206 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 allowed_origins=frozenset({origin}),
                 expected_path="/",
                 expected_query="",
-                max_redirects=1,
+                max_redirects=0,
             )
 
-    def test_post_mutation_main_drift_writes_partial_evidence_not_receipt(self) -> None:
+        with mock.patch(
+            "scripts.deploy_hf_space._request_json",
+            return_value={"ok": True},
+        ) as request_json, mock.patch(
+            "scripts.deploy_hf_space.time.monotonic",
+            side_effect=(5.0, 5.0),
+        ):
+            self.assertEqual(
+                _request_json_retry(
+                    "https://example.test/data",
+                    deadline=10.0,
+                    label="bounded request",
+                ),
+                {"ok": True},
+            )
+        self.assertLessEqual(request_json.call_args.kwargs["timeout"], 5.0)
+
+    def test_prior_runtime_revision_is_retried_as_propagation(self) -> None:
+        with mock.patch(
+            "scripts.deploy_hf_space._request_json_retry",
+            side_effect=[
+                {"sha": PARENT_SHA, "runtime": {"stage": "RUNNING"}},
+                {"sha": TARGET_SHA, "runtime": {"stage": "RUNNING"}},
+            ],
+        ) as request_json, mock.patch(
+            "scripts.deploy_hf_space.time.monotonic", return_value=0.0
+        ), mock.patch(
+            "scripts.deploy_hf_space.time.sleep"
+        ):
+            self.assertEqual(
+                _wait_for_exact_running(TARGET_SHA, deadline=10.0), "RUNNING"
+            )
+        self.assertEqual(request_json.call_count, 2)
+
+    def test_same_sha_governance_weakening_writes_partial_not_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / "bundle"
             build_bundle(bundle, SOURCE_SHA)
-            target_sha = "b" * 40
             result = Path(temporary) / "result.json"
             result.write_bytes(
                 canonical_json(
                     {
                         "source_revision": SOURCE_SHA,
                         "target": HF_REPO,
-                        "hf_revision": target_sha,
+                        "hf_revision": TARGET_SHA,
                     }
                 )
             )
             attestation = Path(temporary) / "attestation.json"
             failure = Path(temporary) / "failure.json"
-            expected_paths = {
-                path.relative_to(bundle).as_posix()
-                for path in bundle.rglob("*")
-                if path.is_file()
-            }
-
-            def response(url: str, _token: str = "") -> object:
-                if url.endswith("/repos/szl-holdings/szl-kernels-live/branches/main"):
-                    return {"commit": {"sha": "c" * 40}}
-                if "/tree/" in url:
-                    return [
-                        {"type": "file", "path": path}
-                        for path in sorted(expected_paths | {".gitattributes"})
-                    ]
-                return {"sha": target_sha, "runtime": {"stage": "RUNNING"}}
-
-            def public(url: str, **_kwargs) -> tuple[int, bytes, str, int]:
-                if "/resolve/" in url:
-                    marker = f"/resolve/{target_sha}/"
-                    relative = urllib.parse.unquote(url.split(marker, 1)[1])
-                    return 200, (bundle / relative).read_bytes(), url, 0
-                name = "SPACE_PROVENANCE.json" if "SPACE_PROVENANCE" in url else "index.html"
-                return 200, (bundle / name).read_bytes(), url, 0
-
-            environment = {
-                "GITHUB_REPOSITORY": SOURCE_REPO,
-                "GITHUB_REF": "refs/heads/main",
-                "GOVERNANCE_TOKEN": "test-token",
-                "GITHUB_API_URL": "https://api.github.test",
-            }
-            with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
-                "scripts.deploy_hf_space._request_json", side_effect=response
+            hf_json, public_bytes, public_response = self._public_readback_mocks(
+                bundle, TARGET_SHA
+            )
+            with mock.patch(
+                "scripts.deploy_hf_space._request_json_retry",
+                side_effect=hf_json,
             ), mock.patch(
-                "scripts.deploy_hf_space._public_bytes", side_effect=public
-            ), self.assertRaisesRegex(RuntimeError, "drifted after publication") as caught:
+                "scripts.deploy_hf_space._public_bytes",
+                side_effect=public_bytes,
+            ), mock.patch(
+                "scripts.deploy_hf_space._public_response",
+                side_effect=public_response,
+            ), mock.patch(
+                "scripts.deploy_hf_space.require_governed_main",
+                side_effect=RuntimeError("baseline governance weakened"),
+            ), self.assertRaisesRegex(
+                RuntimeError, "baseline governance weakened"
+            ) as caught:
                 attest_publication(
                     bundle, SOURCE_SHA, result, attestation, timeout=1
                 )
-            write_failure_evidence(failure, SOURCE_SHA, caught.exception, result)
+            mutation_state = {
+                "upload_call_entered": True,
+                "authoritative_readback_attempted": False,
+                "known_hf_revision": TARGET_SHA,
+            }
+            write_failure_evidence(
+                failure,
+                SOURCE_SHA,
+                caught.exception,
+                result,
+                mutation_state,
+            )
             evidence = json.loads(failure.read_text(encoding="utf-8"))
             self.assertEqual(evidence["status"], "PARTIAL_AFTER_MUTATION")
-            self.assertEqual(evidence["hf_revision"], target_sha)
+            self.assertEqual(evidence["hf_revision"], TARGET_SHA)
             self.assertFalse(evidence["receipt_minted"])
             self.assertFalse(evidence["measured"])
+            self.assertFalse(evidence["deployment_success"])
             self.assertFalse(attestation.exists())
 
+    def test_upload_entry_and_ambiguous_mutation_state_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "bundle"
+            build_bundle(bundle, SOURCE_SHA)
+            result = Path(temporary) / "result.json"
+            state: dict[str, object] = {}
+            api = mock.Mock()
+            api.space_info.return_value = mock.Mock(sha=PARENT_SHA)
+            api.upload_folder.side_effect = TimeoutError("transport reset")
+            module = types.ModuleType("huggingface_hub")
+            module.HfApi = lambda token: api
+            environment = {"HF_TOKEN": "test-hf-token"}
+            with mock.patch.dict("os.environ", environment, clear=True), mock.patch.dict(
+                sys.modules, {"huggingface_hub": module}
+            ), mock.patch(
+                "scripts.deploy_hf_space.require_governed_main",
+                return_value={"status": "AUTHORIZED"},
+            ), mock.patch(
+                "scripts.deploy_hf_space._recover_authoritative_revision",
+                return_value=None,
+            ), self.assertRaises(TimeoutError):
+                deploy_bundle(bundle, SOURCE_SHA, result, state)
+
+            self.assertTrue(state["upload_call_entered"])
+            self.assertTrue(state["authoritative_readback_attempted"])
+            self.assertIsNone(state["known_hf_revision"])
+            api.upload_folder.assert_called_once()
+            upload = api.upload_folder.call_args.kwargs
+            self.assertEqual(upload["parent_commit"], PARENT_SHA)
+            self.assertEqual(upload["delete_patterns"], "*")
+
+            failure = Path(temporary) / "unknown.json"
+            write_failure_evidence(
+                failure, SOURCE_SHA, TimeoutError("transport reset"), result, state
+            )
+            unknown = json.loads(failure.read_text(encoding="utf-8"))
+            self.assertEqual(unknown["status"], "MUTATION_OUTCOME_UNKNOWN")
+            self.assertIsNone(unknown["hf_revision"])
+
+            precondition_state: dict[str, object] = {}
+            with mock.patch(
+                "scripts.deploy_hf_space.require_governed_main",
+                side_effect=RuntimeError("governance unavailable"),
+            ), self.assertRaises(RuntimeError):
+                deploy_bundle(bundle, SOURCE_SHA, result, precondition_state)
+            before = Path(temporary) / "before.json"
+            write_failure_evidence(
+                before,
+                SOURCE_SHA,
+                RuntimeError("governance unavailable"),
+                result,
+                precondition_state,
+            )
+            self.assertEqual(
+                json.loads(before.read_text(encoding="utf-8"))["status"],
+                "FAILED_BEFORE_MUTATION",
+            )
+
+    def test_workflow_stage_failure_is_machine_readable_and_never_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = root / "result.json"
+            receipt = root / "receipt.json"
+            output = root / "failure.json"
+            result.write_bytes(
+                canonical_json(
+                    {
+                        "source_revision": SOURCE_SHA,
+                        "target": HF_REPO,
+                        "hf_revision": TARGET_SHA,
+                    }
+                )
+            )
+            receipt.write_bytes(
+                canonical_json(
+                    {
+                        "status": "MEASURED",
+                        "source_revision": SOURCE_SHA,
+                        "hf_revision": TARGET_SHA,
+                        "target": HF_REPO,
+                        "source": {
+                            "repository": SOURCE_REPO,
+                            "revision": SOURCE_SHA,
+                            "relation": SOURCE_RELATION,
+                        },
+                    }
+                )
+            )
+            evidence = write_workflow_stage_failure(
+                output,
+                SOURCE_SHA,
+                result,
+                receipt,
+                failure_stage="OIDC_RECEIPT_ATTESTATION",
+                artifact_outcome="success",
+                oidc_outcome="failure",
+            )
+            self.assertEqual(
+                evidence["status"], "FAILED_AFTER_LOCAL_MEASUREMENT"
+            )
+            self.assertEqual(evidence["hf_revision"], TARGET_SHA)
+            self.assertFalse(evidence["receipt_minted"])
+            self.assertFalse(evidence["deployment_success"])
+            self.assertEqual(
+                output.read_bytes(), canonical_json(evidence)
+            )
 
 if __name__ == "__main__":
     unittest.main()
