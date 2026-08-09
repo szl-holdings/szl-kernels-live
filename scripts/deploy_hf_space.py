@@ -1535,6 +1535,7 @@ def _success_contract_violations(
     result: dict[str, object],
     measurement: dict[str, object],
     measurement_bytes: bytes,
+    manifest: dict[str, object] | None = None,
 ) -> list[str]:
     expected_source = {
         "repository": SOURCE_REPO,
@@ -1542,6 +1543,19 @@ def _success_contract_violations(
         "relation": SOURCE_RELATION,
     }
     violations: list[str] = []
+    expected_index: dict[str, object] | None = None
+    if manifest is not None:
+        entries = manifest.get("files")
+        matches = (
+            [entry for entry in entries if entry.get("path") == "index.html"]
+            if isinstance(entries, list)
+            and all(isinstance(entry, dict) for entry in entries)
+            else []
+        )
+        if len(matches) != 1:
+            violations.append("manifest.index_html")
+        else:
+            expected_index = matches[0]
 
     if result.get("schema") != "szl.hf-deploy-result/v1":
         violations.append("result.schema")
@@ -1593,11 +1607,21 @@ def _success_contract_violations(
         and result_bundle != measurement_bundle
     ):
         violations.append("cross.bundle_sha256")
+    if manifest is not None and result_bundle != manifest.get("bundle_sha256"):
+        violations.append("cross.result_bundle_manifest")
     if not re.fullmatch(r"[0-9a-f]{64}", str(measurement.get("tree_sha256", ""))):
         violations.append("measurement.tree_sha256")
 
-    if not _is_exact_public_index_proof(measurement.get("public_index")):
+    public_index = measurement.get("public_index")
+    if not _is_exact_public_index_proof(public_index):
         violations.append("measurement.public_index_proof")
+    elif expected_index is not None:
+        if public_index["normalized_bytes"] != expected_index.get("bytes"):
+            violations.append("cross.public_index_normalized_bytes")
+        if public_index["normalized_sha256"] != expected_index.get("sha256"):
+            violations.append("cross.public_index_normalized_sha256")
+    if manifest is not None and file_count != manifest.get("file_count"):
+        violations.append("cross.file_count_manifest")
     post_publication_main = measurement.get("post_publication_main")
     expected_post_publication_main = {
         "status": GOVERNED_MAIN_STATUS,
@@ -1623,10 +1647,12 @@ def _success_contract_violations(
 
 def _canonical_success_receipt(
     source_sha: str,
+    bundle: Path,
     result_path: Path,
     measurement_path: Path,
 ) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
+    manifest = validate_bundle(bundle, source_sha)
     result = json.loads(result_path.read_text(encoding="utf-8"))
     measurement_bytes = measurement_path.read_bytes()
     measurement = json.loads(measurement_bytes)
@@ -1637,6 +1663,7 @@ def _canonical_success_receipt(
         result,
         measurement,
         measurement_bytes,
+        manifest,
     )
     if violations:
         raise RuntimeError(
@@ -1663,10 +1690,13 @@ def _canonical_success_receipt(
 def synthesize_candidate_receipt(
     output_path: Path,
     source_sha: str,
+    bundle: Path,
     result_path: Path,
     measurement_path: Path,
 ) -> dict[str, object]:
-    receipt = _canonical_success_receipt(source_sha, result_path, measurement_path)
+    receipt = _canonical_success_receipt(
+        source_sha, bundle, result_path, measurement_path
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("xb") as handle:
         handle.write(canonical_json(receipt))
@@ -1678,6 +1708,7 @@ def finalize_attested_receipt(
     output_path: Path,
     envelope_path: Path,
     source_sha: str,
+    bundle: Path,
     result_path: Path,
     measurement_path: Path,
     *,
@@ -1686,7 +1717,7 @@ def finalize_attested_receipt(
     bundle_path: str,
 ) -> dict[str, object]:
     expected_receipt = _canonical_success_receipt(
-        source_sha, result_path, measurement_path
+        source_sha, bundle, result_path, measurement_path
     )
     candidate_bytes = candidate_path.read_bytes()
     if candidate_bytes != canonical_json(expected_receipt):
@@ -1747,6 +1778,19 @@ def require_receipt_failure_artifact(
         raise RuntimeError("receipt-stage failure evidence was not preserved")
 
 
+def require_deployment_failure_artifact(
+    required: bool,
+    primary_outcome: str,
+    retry_outcome: str,
+) -> None:
+    if not required:
+        return
+    if primary_outcome not in STEP_OUTCOMES or retry_outcome not in STEP_OUTCOMES:
+        raise RuntimeError("failed-deployment artifact outcome is malformed")
+    if primary_outcome != "success" and retry_outcome != "success":
+        raise RuntimeError("failed-deployment evidence was not preserved")
+
+
 def enforce_terminal_evidence(
     *,
     publish_outcome: str,
@@ -1758,6 +1802,8 @@ def enforce_terminal_evidence(
     failure_synthesis_outcome: str,
     failure_artifact_primary_outcome: str,
     failure_artifact_retry_outcome: str,
+    deployment_failure_artifact_primary_outcome: str,
+    deployment_failure_artifact_retry_outcome: str,
 ) -> dict[str, object]:
     success_path = {
         "publish": publish_outcome,
@@ -1772,6 +1818,8 @@ def enforce_terminal_evidence(
         "failure_synthesis": failure_synthesis_outcome,
         "failure_artifact_primary": failure_artifact_primary_outcome,
         "failure_artifact_retry": failure_artifact_retry_outcome,
+        "deployment_failure_artifact_primary": deployment_failure_artifact_primary_outcome,
+        "deployment_failure_artifact_retry": deployment_failure_artifact_retry_outcome,
     }
     if any(outcome not in STEP_OUTCOMES for outcome in all_outcomes.values()):
         raise RuntimeError("terminal publication outcome is malformed")
@@ -1786,6 +1834,11 @@ def enforce_terminal_evidence(
         receipt_failure_required,
         failure_artifact_primary_outcome,
         failure_artifact_retry_outcome,
+    )
+    require_deployment_failure_artifact(
+        publish_outcome == "failure",
+        deployment_failure_artifact_primary_outcome,
+        deployment_failure_artifact_retry_outcome,
     )
     failed = [name for name, outcome in success_path.items() if outcome != "success"]
     if failed:
@@ -1839,6 +1892,7 @@ def stage_failure_main(argv: list[str]) -> int:
 def candidate_receipt_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--measurement", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -1846,6 +1900,7 @@ def candidate_receipt_main(argv: list[str]) -> int:
     receipt = synthesize_candidate_receipt(
         args.output,
         args.source_sha,
+        args.bundle,
         args.result,
         args.measurement,
     )
@@ -1856,6 +1911,7 @@ def candidate_receipt_main(argv: list[str]) -> int:
 def finalize_receipt_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--measurement", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
@@ -1870,6 +1926,7 @@ def finalize_receipt_main(argv: list[str]) -> int:
         args.output,
         args.envelope,
         args.source_sha,
+        args.bundle,
         args.result,
         args.measurement,
         attestation_id=args.attestation_id,
@@ -1891,6 +1948,8 @@ def enforce_terminal_main(argv: list[str]) -> int:
     parser.add_argument("--failure-synthesis-outcome", required=True)
     parser.add_argument("--failure-artifact-primary-outcome", required=True)
     parser.add_argument("--failure-artifact-retry-outcome", required=True)
+    parser.add_argument("--deployment-failure-artifact-primary-outcome", required=True)
+    parser.add_argument("--deployment-failure-artifact-retry-outcome", required=True)
     args = parser.parse_args(argv)
     result = enforce_terminal_evidence(**vars(args))
     print(json.dumps(result, sort_keys=True))

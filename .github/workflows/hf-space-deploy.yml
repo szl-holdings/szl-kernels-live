@@ -16,9 +16,14 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # 5m mutation + 10m public readback + 30m setup, attestations, evidence, and cleanup.
-    timeout-minutes: 45
+    # 15m bounded pre-mutation + 5m mutation + 10m readback + 30m terminal evidence.
+    timeout-minutes: 60
     steps:
+      - name: Record cumulative job budget origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'HF_JOB_STARTED_AT_EPOCH=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
       - name: Checkout exact protected-main event
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -88,6 +93,20 @@ jobs:
           )"
           test "$live_sha" = "$GITHUB_SHA"
           printf 'Protected main remains exact at %s\n' "$live_sha"
+      - name: Reserve full terminal-evidence budget before mutation
+        id: terminal-budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$HF_JOB_STARTED_AT_EPOCH" =~ ^[0-9]+$ ]]
+          now="$(date +%s)"
+          elapsed="$((now - HF_JOB_STARTED_AT_EPOCH))"
+          max_pre_mutation_seconds=900
+          if (( elapsed < 0 || elapsed > max_pre_mutation_seconds )); then
+            printf 'FAIL-CLOSED: pre-mutation budget exhausted after %ss\n' "$elapsed" >&2
+            exit 1
+          fi
+          printf 'Reserved 45m terminal-evidence budget after %ss pre-mutation\n' "$elapsed"
       - name: Publish and measure exact protected-main bundle
         id: publish-measure
         env:
@@ -125,6 +144,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/hf-terminal-candidate"
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py candidate-receipt \
             --source-sha "$GITHUB_SHA" \
+            --bundle "$RUNNER_TEMP/hf-bundle" \
             --result "$RUNNER_TEMP/hf-deploy-result.json" \
             --measurement "$RUNNER_TEMP/hf-live-attestation.json" \
             --output "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json"
@@ -150,6 +170,7 @@ jobs:
           test -f "$ATTESTATION_BUNDLE_PATH"
           "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py finalize-receipt \
             --source-sha "$GITHUB_SHA" \
+            --bundle "$RUNNER_TEMP/hf-bundle" \
             --result "$RUNNER_TEMP/hf-deploy-result.json" \
             --measurement "$RUNNER_TEMP/hf-live-attestation.json" \
             --candidate "$RUNNER_TEMP/hf-terminal-candidate/hf-canonical-success-receipt.json" \
@@ -231,16 +252,33 @@ jobs:
           path: ${{ runner.temp }}/hf-receipt-stage-failure.json
           if-no-files-found: error
           retention-days: 90
-      - name: Upload separate failed-deployment evidence
+      - name: Upload failed-deployment evidence primary
+        id: deployment-failure-artifact-primary
         if: always() && steps.publish-measure.outcome == 'failure'
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hf-space-deployment-failure
+          name: hf-space-deployment-failure-primary
           path: |
             ${{ runner.temp }}/hf-deploy-failure.json
             ${{ runner.temp }}/hf-deploy-result.json
             ${{ runner.temp }}/hf-live-attestation.json
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retry failed-deployment evidence upload
+        id: deployment-failure-artifact-retry
+        if: >-
+          always() && steps.publish-measure.outcome == 'failure' &&
+          steps.deployment-failure-artifact-primary.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hf-space-deployment-failure-retry
+          path: |
+            ${{ runner.temp }}/hf-deploy-failure.json
+            ${{ runner.temp }}/hf-deploy-result.json
+            ${{ runner.temp }}/hf-live-attestation.json
+          if-no-files-found: error
           retention-days: 90
       - name: Enforce terminal publication evidence
         if: always()
@@ -256,4 +294,6 @@ jobs:
             --terminal-artifact-outcome "${{ steps.terminal-success-artifact.outcome }}" \
             --failure-synthesis-outcome "${{ steps.receipt-stage-failure.outcome }}" \
             --failure-artifact-primary-outcome "${{ steps.receipt-stage-failure-artifact-primary.outcome }}" \
-            --failure-artifact-retry-outcome "${{ steps.receipt-stage-failure-artifact-retry.outcome }}"
+            --failure-artifact-retry-outcome "${{ steps.receipt-stage-failure-artifact-retry.outcome }}" \
+            --deployment-failure-artifact-primary-outcome "${{ steps.deployment-failure-artifact-primary.outcome }}" \
+            --deployment-failure-artifact-retry-outcome "${{ steps.deployment-failure-artifact-retry.outcome }}"

@@ -402,8 +402,12 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         ):
             self.assertIn(f'--cleanup-path "{cleanup_path}"', workflow)
         self.assertIn("if-no-files-found: error", workflow)
-        self.assertIn("Upload separate failed-deployment evidence", workflow)
-        self.assertIn("hf-space-deployment-failure", workflow)
+        self.assertIn("deployment-failure-artifact-primary", workflow)
+        self.assertIn("deployment-failure-artifact-retry", workflow)
+        self.assertIn("hf-space-deployment-failure-primary", workflow)
+        self.assertIn("hf-space-deployment-failure-retry", workflow)
+        self.assertIn("--deployment-failure-artifact-primary-outcome", workflow)
+        self.assertIn("--deployment-failure-artifact-retry-outcome", workflow)
         self.assertIn("hf-space-deployment-evidence", workflow)
         self.assertIn(
             "group: hf-space-deploy-${{ github.repository }}-production", workflow
@@ -412,11 +416,20 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         timeout = re.search(r"^\s+timeout-minutes:\s+(\d+)$", workflow, re.MULTILINE)
         self.assertIsNotNone(timeout)
         timeout_seconds = int(timeout.group(1)) * 60
-        self.assertGreater(timeout_seconds, 300 + 600 + 1200)
+        self.assertEqual(timeout_seconds, 3600)
         self.assertIn(
-            "5m mutation + 10m public readback + 30m setup, attestations, evidence, and cleanup",
+            "15m bounded pre-mutation + 5m mutation + 10m readback + 30m terminal evidence",
             workflow,
         )
+        self.assertIn("Record cumulative job budget origin", workflow)
+        self.assertIn("HF_JOB_STARTED_AT_EPOCH", workflow)
+        self.assertIn("Reserve full terminal-evidence budget before mutation", workflow)
+        self.assertIn("max_pre_mutation_seconds=900", workflow)
+        self.assertLess(
+            workflow.index("Reserve full terminal-evidence budget before mutation"),
+            workflow.index("Publish and measure exact protected-main bundle"),
+        )
+        self.assertIn('--bundle "$RUNNER_TEMP/hf-bundle"', workflow)
         self.assertIn('python-version: "3.12.13"', workflow)
         self.assertIn("python -I -P -m venv", workflow)
         self.assertIn("--require-hashes", workflow)
@@ -1371,19 +1384,20 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             candidate = root / "candidate" / "hf-canonical-success-receipt.json"
             output = root / "hf-canonical-success-receipt.json"
             envelope_path = root / "hf-oidc-attestation-envelope.json"
-            bundle = root / "attestation.jsonl"
-            bundle.write_bytes(b"signed-attestation-bundle\n")
+            bundle = root / "bundle"
+            build_bundle(bundle, SOURCE_SHA)
+            manifest = validate_bundle(bundle, SOURCE_SHA)
+            attestation_bundle = root / "attestation.jsonl"
+            attestation_bundle.write_bytes(b"signed-attestation-bundle\n")
             deployment_result = {
                 "schema": "szl.hf-deploy-result/v1",
                 "source_revision": SOURCE_SHA,
                 "target": HF_REPO,
                 "hf_revision": TARGET_SHA,
-                "bundle_sha256": "d" * 64,
+                "bundle_sha256": manifest["bundle_sha256"],
             }
             result.write_bytes(canonical_json(deployment_result))
-            immutable_index = (
-                b"<!doctype html>\n<html><head>\n</head><body>exact</body></html>\n"
-            )
+            immutable_index = (bundle / "index.html").read_bytes()
             injection = LIVE_INJECTION_FIXTURE.read_bytes().rstrip(b"\r\n")
             public_index = normalize_public_static_index(
                 inject_hf_window(immutable_index, injection),
@@ -1397,8 +1411,8 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "hf_revision": TARGET_SHA,
                 "target": HF_REPO,
                 "runtime_stage": "RUNNING",
-                "bundle_sha256": "d" * 64,
-                "file_count": 10,
+                "bundle_sha256": manifest["bundle_sha256"],
+                "file_count": manifest["file_count"],
                 "tree_sha256": "e" * 64,
                 "public_index": public_index,
                 "public_provenance": {
@@ -1419,6 +1433,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             receipt = synthesize_candidate_receipt(
                 candidate,
                 SOURCE_SHA,
+                bundle,
                 result,
                 measurement,
             )
@@ -1435,11 +1450,12 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 output,
                 envelope_path,
                 SOURCE_SHA,
+                bundle,
                 result,
                 measurement,
                 attestation_id="attestation-id",
                 attestation_url="https://github.com/attestations/attestation-id",
-                bundle_path=str(bundle),
+                bundle_path=str(attestation_bundle),
             )
             self.assertFalse(candidate.exists())
             self.assertEqual(output.read_bytes(), attested_bytes)
@@ -1449,7 +1465,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             )
             self.assertEqual(
                 envelope["attestation"]["bundle"]["sha256"],
-                hashlib.sha256(bundle.read_bytes()).hexdigest(),
+                hashlib.sha256(attestation_bundle.read_bytes()).hexdigest(),
             )
             self.assertNotIn("attestation", json.loads(output.read_text(encoding="utf-8")))
             self.assertEqual(envelope_path.read_bytes(), canonical_json(envelope))
@@ -1463,6 +1479,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     synthesize_candidate_receipt(
                         rejected,
                         SOURCE_SHA,
+                        bundle,
                         result,
                         measurement,
                     )
@@ -1472,6 +1489,12 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "public-index-digest": lambda value: value["public_index"].update(
                     {"normalized_sha256": "not-a-digest"}
                 ),
+                "public-index-wrong-normalized-digest": lambda value: value[
+                    "public_index"
+                ].update({"normalized_sha256": "f" * 64}),
+                "public-index-wrong-normalized-bytes": lambda value: value[
+                    "public_index"
+                ].update({"normalized_bytes": value["public_index"]["normalized_bytes"] + 1}),
                 "public-index-missing-field": lambda value: value["public_index"].pop(
                     "injection_bytes"
                 ),
@@ -1514,6 +1537,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     synthesize_candidate_receipt(
                         rejected,
                         SOURCE_SHA,
+                        bundle,
                         result,
                         measurement,
                     )
@@ -1528,6 +1552,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 synthesize_candidate_receipt(
                     rejected,
                     SOURCE_SHA,
+                    bundle,
                     result,
                     measurement,
                 )
@@ -1549,6 +1574,8 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             "failure_synthesis_outcome": "success",
             "failure_artifact_primary_outcome": "failure",
             "failure_artifact_retry_outcome": "success",
+            "deployment_failure_artifact_primary_outcome": "skipped",
+            "deployment_failure_artifact_retry_outcome": "skipped",
         }
         with self.assertRaisesRegex(RuntimeError, "terminal publication evidence is incomplete"):
             enforce_terminal_evidence(**outcomes)
@@ -1567,6 +1594,8 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             "failure_synthesis_outcome": "skipped",
             "failure_artifact_primary_outcome": "skipped",
             "failure_artifact_retry_outcome": "skipped",
+            "deployment_failure_artifact_primary_outcome": "skipped",
+            "deployment_failure_artifact_retry_outcome": "skipped",
         }
         self.assertEqual(
             enforce_terminal_evidence(**outcomes)["status"],
@@ -1603,8 +1632,15 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
 
         publish_failed = dict(outcomes)
         publish_failed["publish_outcome"] = "failure"
+        publish_failed["deployment_failure_artifact_primary_outcome"] = "success"
         with self.assertRaisesRegex(RuntimeError, "incomplete"):
             enforce_terminal_evidence(**publish_failed)
+
+        deployment_evidence_missing = dict(publish_failed)
+        deployment_evidence_missing["deployment_failure_artifact_primary_outcome"] = "failure"
+        deployment_evidence_missing["deployment_failure_artifact_retry_outcome"] = "failure"
+        with self.assertRaisesRegex(RuntimeError, "failed-deployment evidence was not preserved"):
+            enforce_terminal_evidence(**deployment_evidence_missing)
 
         for outcome_name in outcomes:
             malformed = dict(outcomes)
