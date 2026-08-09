@@ -17,7 +17,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     # 15m bounded pre-mutation + 5m mutation + 10m readback + 30m terminal evidence.
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Record cumulative job budget origin
         shell: bash
@@ -101,8 +101,11 @@ jobs:
           [[ "$HF_JOB_STARTED_AT_EPOCH" =~ ^[0-9]+$ ]]
           now="$(date +%s)"
           elapsed="$((now - HF_JOB_STARTED_AT_EPOCH))"
+          job_timeout_seconds=5400
           max_pre_mutation_seconds=900
-          if (( elapsed < 0 || elapsed > max_pre_mutation_seconds )); then
+          minimum_post_gate_seconds=4500
+          remaining="$((job_timeout_seconds - elapsed))"
+          if (( elapsed < 0 || elapsed > max_pre_mutation_seconds || remaining < minimum_post_gate_seconds )); then
             printf 'FAIL-CLOSED: pre-mutation budget exhausted after %ss\n' "$elapsed" >&2
             exit 1
           fi
@@ -252,9 +255,21 @@ jobs:
           path: ${{ runner.temp }}/hf-receipt-stage-failure.json
           if-no-files-found: error
           retention-days: 90
+      - name: Require failed-deployment evidence JSON before artifact upload
+        id: deployment-failure-json
+        if: always() && steps.publish-measure.outcome == 'failure'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/hf-deploy-failure.json"
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P -c \
+            'import json,os,pathlib,sys; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"hf-deploy-failure.json"; data=json.loads(p.read_text(encoding="utf-8")); sys.exit(0 if isinstance(data,dict) else "failed-deployment evidence must be a JSON object")'
       - name: Upload failed-deployment evidence primary
         id: deployment-failure-artifact-primary
-        if: always() && steps.publish-measure.outcome == 'failure'
+        if: >-
+          always() && steps.publish-measure.outcome == 'failure' &&
+          steps.deployment-failure-json.outcome == 'success'
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -269,6 +284,7 @@ jobs:
         id: deployment-failure-artifact-retry
         if: >-
           always() && steps.publish-measure.outcome == 'failure' &&
+          steps.deployment-failure-json.outcome == 'success' &&
           steps.deployment-failure-artifact-primary.outcome != 'success'
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -416,7 +416,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         timeout = re.search(r"^\s+timeout-minutes:\s+(\d+)$", workflow, re.MULTILINE)
         self.assertIsNotNone(timeout)
         timeout_seconds = int(timeout.group(1)) * 60
-        self.assertEqual(timeout_seconds, 3600)
+        self.assertEqual(timeout_seconds, 5400)
         self.assertIn(
             "15m bounded pre-mutation + 5m mutation + 10m readback + 30m terminal evidence",
             workflow,
@@ -1793,6 +1793,30 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             self.assertEqual(evidence["result_input_status"], "UNREADABLE")
             self.assertEqual(evidence["measurement_input_status"], "UNREADABLE")
             self.assertNotIn("HF_TOKEN", output.read_text(encoding="utf-8"))
+
+class TerminalEvidenceEnvelopeContractTests(unittest.TestCase):
+    def test_job_envelope_reserves_governance_and_terminal_closure(self):
+        root = __import__("pathlib").Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "hf-space-deploy.yml").read_text(encoding="utf-8")
+        self.assertIn("timeout-minutes: 90", workflow)
+        self.assertIn("job_timeout_seconds=5400", workflow)
+        self.assertIn("max_pre_mutation_seconds=900", workflow)
+        self.assertIn("minimum_post_gate_seconds=4500", workflow)
+        self.assertIn('remaining="$((job_timeout_seconds - elapsed))"', workflow)
+        self.assertIn("remaining < minimum_post_gate_seconds", workflow)
+
+    def test_failed_deployment_json_is_required_before_both_upload_attempts(self):
+        root = __import__("pathlib").Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "hf-space-deploy.yml").read_text(encoding="utf-8")
+        self.assertIn("id: deployment-failure-json", workflow)
+        self.assertIn('test -s "$RUNNER_TEMP/hf-deploy-failure.json"', workflow)
+        self.assertEqual(workflow.count("steps.deployment-failure-json.outcome == 'success'"), 2)
+        preflight = workflow.index("id: deployment-failure-json")
+        primary = workflow.index("id: deployment-failure-artifact-primary")
+        retry = workflow.index("id: deployment-failure-artifact-retry")
+        self.assertLess(preflight, primary)
+        self.assertLess(primary, retry)
+
 
 if __name__ == "__main__":
     unittest.main()
