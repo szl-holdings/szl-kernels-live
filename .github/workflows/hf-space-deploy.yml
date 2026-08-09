@@ -16,7 +16,8 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 5m mutation + 10m public readback + 30m setup, attestations, evidence, and cleanup.
+    timeout-minutes: 45
     steps:
       - name: Checkout exact protected-main event
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

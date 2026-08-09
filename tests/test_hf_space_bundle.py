@@ -4,6 +4,7 @@ import hashlib
 from html.parser import HTMLParser
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -24,6 +25,7 @@ from scripts.deploy_hf_space import (
     SOURCE_RELATION,
     SOURCE_REPO,
     _fetch_public_index,
+    _hf_upload_child_environment,
     _recover_authoritative_revision,
     _run_killable_child,
     _public_bytes,
@@ -310,7 +312,6 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         )
         self.assertNotIn("GITHUB_TOKEN: ${{ github.token }}", workflow)
         self.assertNotIn("GH_TOKEN: ${{ github.token }}", workflow)
-        self.assertIn("timeout-minutes: 30", workflow)
         mint_governance = workflow.index(
             "Mint least-privilege governed ruleset reader"
         )
@@ -408,6 +409,14 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             "group: hf-space-deploy-${{ github.repository }}-production", workflow
         )
         self.assertIn("cancel-in-progress: false", workflow)
+        timeout = re.search(r"^\s+timeout-minutes:\s+(\d+)$", workflow, re.MULTILINE)
+        self.assertIsNotNone(timeout)
+        timeout_seconds = int(timeout.group(1)) * 60
+        self.assertGreater(timeout_seconds, 300 + 600 + 1200)
+        self.assertIn(
+            "5m mutation + 10m public readback + 30m setup, attestations, evidence, and cleanup",
+            workflow,
+        )
         self.assertIn('python-version: "3.12.13"', workflow)
         self.assertIn("python -I -P -m venv", workflow)
         self.assertIn("--require-hashes", workflow)
@@ -1298,6 +1307,32 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         process.kill.assert_called_once_with()
         self.assertEqual(process.wait.call_args_list[-1], mock.call(timeout=1))
 
+    def test_upload_child_environment_contains_only_the_hf_publication_token(self) -> None:
+        parent_environment = {
+            "HF_TOKEN": "hf-publication-token",
+            "GOVERNANCE_TOKEN": "governance-token",
+            "GITHUB_TOKEN": "github-token",
+            "GH_TOKEN": "gh-token",
+            "ACTIONS_RUNTIME_TOKEN": "actions-runtime-token",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-token",
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.invalid/oidc",
+            "RUNNER_TEMP": "/tmp/runner",
+        }
+        with mock.patch.dict(os.environ, parent_environment, clear=True):
+            child_environment = _hf_upload_child_environment()
+        self.assertEqual(child_environment, {"HF_TOKEN": "hf-publication-token"})
+
+        with mock.patch.dict(os.environ, {"GOVERNANCE_TOKEN": "governance-token"}, clear=True), self.assertRaisesRegex(
+            RuntimeError, "HF_TOKEN is required"
+        ):
+            _hf_upload_child_environment()
+
+        deployer = (
+            Path(__file__).resolve().parents[1] / "scripts" / "deploy_hf_space.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("environment=child_environment", deployer)
+        self.assertNotIn("environment=dict(os.environ)", deployer)
+
     def test_ambiguous_recovery_waits_for_parent_then_accepts_only_exact_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / "bundle"
@@ -1346,6 +1381,14 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "bundle_sha256": "d" * 64,
             }
             result.write_bytes(canonical_json(deployment_result))
+            immutable_index = (
+                b"<!doctype html>\n<html><head>\n</head><body>exact</body></html>\n"
+            )
+            injection = LIVE_INJECTION_FIXTURE.read_bytes().rstrip(b"\r\n")
+            public_index = normalize_public_static_index(
+                inject_hf_window(immutable_index, injection),
+                immutable_index,
+            )
             measured = {
                 "schema": "szl.hf-live-attestation/v2",
                 "status": "MEASURED",
@@ -1357,13 +1400,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "bundle_sha256": "d" * 64,
                 "file_count": 10,
                 "tree_sha256": "e" * 64,
-                "public_index": {
-                    "transformation": "HF_WINDOW_HUGGINGFACE_HEAD_INJECTION_V1",
-                    "normalized_bytes": 128,
-                    "normalized_sha256": "8" * 64,
-                    "injection_bytes": 64,
-                    "injection_sha256": "9" * 64,
-                },
+                "public_index": public_index,
                 "public_provenance": {
                     "verified": True,
                     "source_repository": SOURCE_REPO,
@@ -1371,7 +1408,9 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     "relation": SOURCE_RELATION,
                 },
                 "post_publication_main": {
-                    "status": "AUTHORIZED_EXACT_PROTECTED_MAIN"
+                    "status": "AUTHORIZED_EXACT_PROTECTED_MAIN",
+                    "source_revision": SOURCE_SHA,
+                    "ruleset_ids": [GOVERNED_RULESET_ID],
                 },
                 "receipt_minted": False,
                 "deployment_success": False,
@@ -1430,12 +1469,30 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 self.assertFalse(rejected.exists())
 
             contradictions = {
-                "public-index": lambda value: value["public_index"].update(
+                "public-index-digest": lambda value: value["public_index"].update(
                     {"normalized_sha256": "not-a-digest"}
                 ),
-                "post-main": lambda value: value["post_publication_main"].update(
+                "public-index-missing-field": lambda value: value["public_index"].pop(
+                    "injection_bytes"
+                ),
+                "public-index-extra-field": lambda value: value["public_index"].update(
+                    {"verified": True}
+                ),
+                "public-index-oversized-injection": lambda value: value[
+                    "public_index"
+                ].update({"injection_bytes": HF_WINDOW_MAX_INJECTION_BYTES + 1}),
+                "post-main-status": lambda value: value["post_publication_main"].update(
                     {"status": "UNAUTHORIZED"}
                 ),
+                "post-main-revision": lambda value: value[
+                    "post_publication_main"
+                ].update({"source_revision": "f" * 40}),
+                "post-main-ruleset": lambda value: value[
+                    "post_publication_main"
+                ].update({"ruleset_ids": []}),
+                "post-main-extra-field": lambda value: value[
+                    "post_publication_main"
+                ].update({"protected": True}),
                 "provenance-repository": lambda value: value[
                     "public_provenance"
                 ].update({"source_repository": "szl-holdings/wrong"}),
@@ -1618,7 +1675,9 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                             "relation": SOURCE_RELATION,
                         },
                         "post_publication_main": {
-                            "status": "AUTHORIZED_EXACT_PROTECTED_MAIN"
+                            "status": "AUTHORIZED_EXACT_PROTECTED_MAIN",
+                            "source_revision": SOURCE_SHA,
+                            "ruleset_ids": [GOVERNED_RULESET_ID],
                         },
                         "receipt_minted": False,
                         "deployment_success": False,

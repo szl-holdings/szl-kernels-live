@@ -39,6 +39,17 @@ HF_WINDOW_PREFIX = b"<script>window.huggingface="
 HF_WINDOW_TERMINATOR = b";</script>"
 HF_WINDOW_MAX_INJECTION_BYTES = 4096
 HTML_HEAD_BOUNDARY = b"<head>"
+PUBLIC_INDEX_TRANSFORMATION = "HF_WINDOW_HUGGINGFACE_HEAD_INJECTION_V1"
+PUBLIC_INDEX_FIELDS = frozenset(
+    {
+        "transformation",
+        "normalized_bytes",
+        "normalized_sha256",
+        "injection_bytes",
+        "injection_sha256",
+    }
+)
+GOVERNED_MAIN_STATUS = "AUTHORIZED_EXACT_PROTECTED_MAIN"
 
 
 class TransientReadError(RuntimeError):
@@ -127,7 +138,7 @@ def normalize_public_static_index(
     if normalized != immutable_bytes:
         raise RuntimeError("public index has bytes outside the one platform injection")
     return {
-        "transformation": "HF_WINDOW_HUGGINGFACE_HEAD_INJECTION_V1",
+        "transformation": PUBLIC_INDEX_TRANSFORMATION,
         "normalized_bytes": len(normalized),
         "normalized_sha256": sha256_bytes(normalized),
         "injection_bytes": len(injection),
@@ -371,7 +382,7 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
             + " | ".join(diagnostics or ["no ruleset candidates were disclosed"])
         )
     return {
-        "status": "AUTHORIZED_EXACT_PROTECTED_MAIN",
+        "status": GOVERNED_MAIN_STATUS,
         "source_revision": source_sha,
         "ruleset_ids": accepted,
     }
@@ -490,6 +501,14 @@ def _recover_authoritative_revision(
         return candidate
 
 
+def _hf_upload_child_environment() -> dict[str, str]:
+    """Return the complete, minimal environment for the HF mutation child."""
+    token = os.environ.get("HF_TOKEN", "")
+    if not token:
+        raise RuntimeError("HF_TOKEN is required in the approved secret store")
+    return {"HF_TOKEN": token}
+
+
 def _run_killable_child(
     command: list[str],
     *,
@@ -604,9 +623,7 @@ def deploy_bundle(
     manifest = validate_bundle(bundle, source_sha)
     authorization = require_governed_main(source_sha)
 
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        raise RuntimeError("HF_TOKEN is required in the approved secret store")
+    child_environment = _hf_upload_child_environment()
     mutation_deadline = time.monotonic() + mutation_timeout
     before = _request_json_retry(
         f"https://huggingface.co/api/spaces/{HF_REPO}",
@@ -662,11 +679,7 @@ def deploy_bundle(
             deadline=upload_deadline,
             entered_marker=entered_marker,
             mutation_state=mutation_state,
-            environment={
-                key: value
-                for key, value in os.environ.items()
-                if key != "GOVERNANCE_TOKEN"
-            },
+            environment=child_environment,
         )
         child_value = json.loads(child_result.read_text(encoding="utf-8"))
         target_sha = exact_sha(
@@ -1490,6 +1503,33 @@ def _read_workflow_json(
     return "PARSED", payload, parsed
 
 
+def _is_exact_public_index_proof(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != PUBLIC_INDEX_FIELDS:
+        return False
+    normalized_bytes = value.get("normalized_bytes")
+    injection_bytes = value.get("injection_bytes")
+    normalized_digest = value.get("normalized_sha256")
+    injection_digest = value.get("injection_sha256")
+    minimum_injection_bytes = (
+        len(HF_WINDOW_PREFIX) + len(b"{}") + len(HF_WINDOW_TERMINATOR)
+    )
+    return all(
+        (
+            value.get("transformation") == PUBLIC_INDEX_TRANSFORMATION,
+            isinstance(normalized_bytes, int),
+            not isinstance(normalized_bytes, bool),
+            normalized_bytes >= len(HTML_HEAD_BOUNDARY),
+            isinstance(normalized_digest, str),
+            re.fullmatch(r"[0-9a-f]{64}", normalized_digest) is not None,
+            isinstance(injection_bytes, int),
+            not isinstance(injection_bytes, bool),
+            minimum_injection_bytes <= injection_bytes <= HF_WINDOW_MAX_INJECTION_BYTES,
+            isinstance(injection_digest, str),
+            re.fullmatch(r"[0-9a-f]{64}", injection_digest) is not None,
+        )
+    )
+
+
 def _success_contract_violations(
     source_sha: str,
     result: dict[str, object],
@@ -1556,31 +1596,15 @@ def _success_contract_violations(
     if not re.fullmatch(r"[0-9a-f]{64}", str(measurement.get("tree_sha256", ""))):
         violations.append("measurement.tree_sha256")
 
-    public_index = measurement.get("public_index")
-    if (
-        not isinstance(public_index, dict)
-        or public_index.get("transformation")
-        != "HF_WINDOW_HUGGINGFACE_HEAD_INJECTION_V1"
-        or not isinstance(public_index.get("normalized_bytes"), int)
-        or isinstance(public_index.get("normalized_bytes"), bool)
-        or public_index["normalized_bytes"] < 0
-        or not re.fullmatch(
-            r"[0-9a-f]{64}", str(public_index.get("normalized_sha256", ""))
-        )
-        or not isinstance(public_index.get("injection_bytes"), int)
-        or isinstance(public_index.get("injection_bytes"), bool)
-        or public_index["injection_bytes"] < 0
-        or not re.fullmatch(
-            r"[0-9a-f]{64}", str(public_index.get("injection_sha256", ""))
-        )
-    ):
-        violations.append("measurement.public_index_verified")
+    if not _is_exact_public_index_proof(measurement.get("public_index")):
+        violations.append("measurement.public_index_proof")
     post_publication_main = measurement.get("post_publication_main")
-    if (
-        not isinstance(post_publication_main, dict)
-        or post_publication_main.get("status")
-        != "AUTHORIZED_EXACT_PROTECTED_MAIN"
-    ):
+    expected_post_publication_main = {
+        "status": GOVERNED_MAIN_STATUS,
+        "source_revision": source_sha,
+        "ruleset_ids": [GOVERNED_RULESET_ID],
+    }
+    if post_publication_main != expected_post_publication_main:
         violations.append("measurement.post_publication_main_authorized")
     public_provenance = measurement.get("public_provenance")
     if not isinstance(public_provenance, dict):
