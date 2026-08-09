@@ -40,6 +40,21 @@ historical evidence but is not an exact-source qualification. Its manifest
 declares `_chain.py` as 11,672 bytes with SHA-256 `5ffd4e58...`; immutable Hub
 revision `95f74bc...` serves 11,489 bytes with SHA-256 `822f24ad...`.
 
+### Fix-forward publication status
+
+Merge `639bec25606b4feff580f3a0e988965add7bd15d` corrected this repository's
+contract and interface truth; it did not qualify the contradicted kernel artifact
+as source-bound. Its protected-main publication run `31281802441` failed during
+policy reauthorization before any Hugging Face mutation. At that observed
+failure boundary, the public Space remained source-bound to repository commit
+`e03cdb25aee118152e8f3c5aa8f95806aa10a034` at Hugging Face revision
+`c9917d43167ef7e2430c52ce67af54c9bfacafcc`.
+
+This fix-forward status does not authorize replay of Forge run `30721609223`.
+That historical attempt remains `NEVER_RESEND`; only a future reviewed protected-
+main commit may trigger a new Space publication through this repository's
+push-only publisher.
+
 ## Portfolio shape
 
 - **Flagship experimental:** `szl-kernels`

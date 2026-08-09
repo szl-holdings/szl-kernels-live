@@ -55,6 +55,83 @@ def _request_json(url: str, token: str = "") -> object:
         return json.load(response)
 
 
+def evaluate_effective_rulesets(
+    summaries: object,
+    details: dict[int, object],
+    effective_rules: object,
+) -> tuple[list[int], list[str]]:
+    """Prove one active, no-bypass ruleset governs the exact default branch."""
+    if not isinstance(summaries, list):
+        raise RuntimeError("repository ruleset inventory is unavailable")
+    if not isinstance(effective_rules, list):
+        raise RuntimeError("effective default-branch rules are unavailable")
+
+    effective_types: dict[int, set[object]] = {}
+    effective_sources: dict[int, set[str]] = {}
+    for row in effective_rules:
+        if not isinstance(row, dict):
+            continue
+        ruleset_id = row.get("ruleset_id")
+        if not isinstance(ruleset_id, int):
+            continue
+        effective_types.setdefault(ruleset_id, set()).add(row.get("type"))
+        source = row.get("ruleset_source")
+        if isinstance(source, str):
+            effective_sources.setdefault(ruleset_id, set()).add(source)
+
+    accepted: list[int] = []
+    diagnostics: list[str] = []
+    for index, summary in enumerate(summaries, start=1):
+        if not isinstance(summary, dict):
+            diagnostics.append(f"candidate {index}: summary is not an object")
+            continue
+        ruleset_id = summary.get("id")
+        if not isinstance(ruleset_id, int):
+            diagnostics.append(f"candidate {index}: integer ruleset id is unavailable")
+            continue
+
+        reasons: list[str] = []
+        if summary.get("enforcement") != "active":
+            reasons.append("enforcement is not active")
+
+        detail = details.get(ruleset_id)
+        if not isinstance(detail, dict):
+            reasons.append("detail response is unavailable")
+            detail = {}
+        retrieval_error = detail.get("_retrieval_error")
+        if isinstance(retrieval_error, str):
+            reasons.append(f"detail retrieval failed ({retrieval_error})")
+
+        bypass_actors = detail.get("bypass_actors")
+        if bypass_actors is None and "bypass_actors" in summary:
+            bypass_actors = summary.get("bypass_actors")
+        if not isinstance(bypass_actors, list):
+            reasons.append("bypass actors were not disclosed")
+        elif bypass_actors:
+            reasons.append(f"{len(bypass_actors)} bypass actor(s) are present")
+
+        observed_types = effective_types.get(ruleset_id, set())
+        missing_types = sorted(REQUIRED_RULE_TYPES - observed_types)
+        if missing_types:
+            reasons.append("missing effective rules: " + ", ".join(missing_types))
+
+        summary_source = summary.get("source")
+        observed_sources = effective_sources.get(ruleset_id, set())
+        if (
+            isinstance(summary_source, str)
+            and observed_sources
+            and summary_source not in observed_sources
+        ):
+            reasons.append("effective rule source differs from inventory source")
+
+        if reasons:
+            diagnostics.append(f"ruleset {ruleset_id}: " + "; ".join(reasons))
+        else:
+            accepted.append(ruleset_id)
+
+    return accepted, diagnostics
+
+
 def require_governed_main(source_sha: str) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
@@ -84,38 +161,30 @@ def require_governed_main(source_sha: str) -> dict[str, object]:
     summaries = _request_json(
         f"{api_root}/repos/{repository}/rulesets?includes_parents=true", token
     )
-    if not isinstance(summaries, list):
-        raise RuntimeError("repository ruleset inventory is unavailable")
-    accepted: list[int] = []
-    for summary in summaries:
-        if not isinstance(summary, dict) or summary.get("enforcement") != "active":
-            continue
-        ruleset_id = summary.get("id")
-        if not isinstance(ruleset_id, int):
-            continue
-        detail = _request_json(
-            f"{api_root}/repos/{repository}/rulesets/{ruleset_id}", token
-        )
-        if not isinstance(detail, dict):
-            continue
-        include = ((detail.get("conditions") or {}).get("ref_name") or {}).get(
-            "include", []
-        )
-        rule_types = {
-            row.get("type")
-            for row in detail.get("rules", [])
-            if isinstance(row, dict)
-        }
-        if (
-            "~DEFAULT_BRANCH" in include
-            and REQUIRED_RULE_TYPES <= rule_types
-            and detail.get("bypass_actors") == []
-        ):
-            accepted.append(ruleset_id)
+    effective_rules = _request_json(
+        f"{api_root}/repos/{repository}/rules/branches/main", token
+    )
+    details: dict[int, object] = {}
+    if isinstance(summaries, list):
+        for summary in summaries:
+            ruleset_id = summary.get("id") if isinstance(summary, dict) else None
+            if not isinstance(ruleset_id, int):
+                continue
+            try:
+                details[ruleset_id] = _request_json(
+                    f"{api_root}/repos/{repository}/rulesets/{ruleset_id}", token
+                )
+            except Exception as error:
+                details[ruleset_id] = {"_retrieval_error": type(error).__name__}
+    accepted, diagnostics = evaluate_effective_rulesets(
+        summaries,
+        details,
+        effective_rules,
+    )
     if not accepted:
         raise RuntimeError(
-            "default branch lacks an active no-bypass PR, non-fast-forward, "
-            "linear-history ruleset"
+            "default branch policy could not be proven; "
+            + " | ".join(diagnostics or ["no ruleset candidates were disclosed"])
         )
     return {
         "status": "AUTHORIZED_EXACT_PROTECTED_MAIN",
@@ -325,6 +394,7 @@ def attest_publication(
         "bytes": len(manifest_bytes),
         "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
     }
+    verified_tree: list[dict[str, object]] = []
     for relative in sorted(expected_paths):
         url = (
             f"https://huggingface.co/spaces/{HF_REPO}/resolve/{target_sha}/"
@@ -338,6 +408,13 @@ def attest_publication(
             or hashlib.sha256(data).hexdigest() != row["sha256"]
         ):
             raise RuntimeError(f"public live bytes differ: {relative}")
+        verified_tree.append(
+            {
+                "path": relative,
+                "bytes": row["bytes"],
+                "sha256": row["sha256"],
+            }
+        )
 
     origin = _static_origin()
     query = urllib.parse.urlencode({"source": source_sha})
@@ -369,14 +446,20 @@ def attest_publication(
         raise RuntimeError(f"public static source identity did not close: {last_error}")
 
     attestation = {
-        "schema": "szl.hf-live-attestation/v1",
+        "schema": "szl.hf-live-attestation/v2",
         "status": "MEASURED",
         "source_revision": source_sha,
         "hf_revision": target_sha,
         "runtime_stage": "RUNNING",
         "bundle_sha256": manifest["bundle_sha256"],
-        "files_verified": len(expected_paths),
-        "public_source_identity": True,
+        "file_count": len(verified_tree),
+        "tree_sha256": hashlib.sha256(canonical_json(verified_tree)).hexdigest(),
+        "public_provenance": {
+            "schema": provenance["schema"],
+            "source_revision": provenance["source"]["commit"],
+            "relation": provenance["source"].get("relation"),
+            "verified": True,
+        },
         "target": HF_REPO,
     }
     attestation_path.write_bytes(canonical_json(attestation))
@@ -398,7 +481,7 @@ def write_failure_evidence(
     path.write_bytes(
         canonical_json(
             {
-                "schema": "szl.hf-live-attestation/v1",
+                "schema": "szl.hf-deploy-failure/v1",
                 "status": "FAILED",
                 "source_revision": source_sha,
                 "hf_revision": published_revision,
@@ -416,6 +499,7 @@ def main() -> int:
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--attestation", type=Path, required=True)
+    parser.add_argument("--failure-evidence", type=Path, required=True)
     args = parser.parse_args()
     source_sha = exact_sha(args.source_sha, "workflow source")
     try:
@@ -427,7 +511,12 @@ def main() -> int:
             args.attestation,
         )
     except Exception as error:
-        write_failure_evidence(args.attestation, source_sha, error, args.result)
+        write_failure_evidence(
+            args.failure_evidence,
+            source_sha,
+            error,
+            args.result,
+        )
         raise
     print(json.dumps(attestation, sort_keys=True))
     return 0

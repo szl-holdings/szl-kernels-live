@@ -13,6 +13,8 @@ from scripts.build_hf_space_bundle import build_bundle
 from scripts.deploy_hf_space import (
     HF_REPO,
     attest_publication,
+    canonical_json,
+    evaluate_effective_rulesets,
     require_governed_main,
     validate_bundle,
 )
@@ -183,27 +185,128 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertIn(
             '--attestation "$RUNNER_TEMP/hf-live-attestation.json"', workflow
         )
-        self.assertIn("if: always()", workflow)
+        self.assertIn(
+            '--failure-evidence "$RUNNER_TEMP/hf-deploy-failure.json"', workflow
+        )
+        publish = workflow.index("python scripts/deploy_hf_space.py")
+        final_attestation = workflow.index("Attest final exact-revision receipt")
+        final_subject = workflow.index(
+            "subject-path: ${{ runner.temp }}/hf-live-attestation.json"
+        )
+        success_evidence = workflow.index(
+            "Upload required successful deployment evidence"
+        )
+        self.assertLess(publish, final_attestation)
+        self.assertLess(final_attestation, final_subject)
+        self.assertLess(final_subject, success_evidence)
+        self.assertEqual(workflow.count("actions/attest-build-provenance@"), 2)
+        self.assertIn("if-no-files-found: error", workflow)
+        self.assertIn("Upload separate failed-deployment evidence", workflow)
+        self.assertIn("hf-space-deployment-failure", workflow)
         self.assertIn("hf-space-deployment-evidence", workflow)
 
-    def test_in_process_guard_requires_exact_no_bypass_main(self) -> None:
+    def test_inherited_projected_ruleset_is_bound_to_effective_main(self) -> None:
+        summaries = [
+            {
+                "id": 7,
+                "name": "org-default-branch-protection",
+                "source": "szl-holdings",
+                "source_type": "Organization",
+                "enforcement": "active",
+            }
+        ]
+        details = {7: {"id": 7, "bypass_actors": []}}
+        effective = [
+            {
+                "type": rule_type,
+                "ruleset_id": 7,
+                "ruleset_source": "szl-holdings",
+                "ruleset_source_type": "Organization",
+            }
+            for rule_type in (
+                "pull_request",
+                "non_fast_forward",
+                "required_linear_history",
+            )
+        ]
+
+        accepted, diagnostics = evaluate_effective_rulesets(
+            summaries,
+            details,
+            effective,
+        )
+
+        self.assertEqual(accepted, [7])
+        self.assertEqual(diagnostics, [])
+
+    def test_policy_rejections_are_candidate_specific_and_secret_free(self) -> None:
+        summaries = [
+            {"id": 7, "enforcement": "active"},
+            {"id": 8, "enforcement": "active"},
+            {"id": 9, "enforcement": "active"},
+        ]
+        details = {
+            7: {"bypass_actors": [{"actor_type": "OrganizationAdmin"}]},
+            8: {"bypass_actors": []},
+            9: {"_retrieval_error": "HTTPError"},
+        }
+        effective = [
+            {"type": rule_type, "ruleset_id": ruleset_id}
+            for ruleset_id, rule_types in (
+                (7, ("pull_request", "non_fast_forward", "required_linear_history")),
+                (8, ("pull_request", "non_fast_forward")),
+                (9, ("pull_request", "non_fast_forward", "required_linear_history")),
+            )
+            for rule_type in rule_types
+        ]
+
+        accepted, diagnostics = evaluate_effective_rulesets(
+            summaries,
+            details,
+            effective,
+        )
+        message = " | ".join(diagnostics)
+
+        self.assertEqual(accepted, [])
+        self.assertIn("ruleset 7: 1 bypass actor(s) are present", message)
+        self.assertIn(
+            "ruleset 8: missing effective rules: required_linear_history",
+            message,
+        )
+        self.assertIn("ruleset 9: detail retrieval failed (HTTPError)", message)
+        self.assertIn("bypass actors were not disclosed", message)
+        self.assertNotIn("test-token", message)
+
+    def test_in_process_guard_requires_exact_effective_no_bypass_main(self) -> None:
         def response(url: str, _token: str = "") -> object:
             if url.endswith("/repos/szl-holdings/szl-kernels-live"):
                 return {"default_branch": "main"}
+            if url.endswith("/rulesets?includes_parents=true"):
+                return [
+                    {
+                        "id": 7,
+                        "enforcement": "active",
+                        "source": "szl-holdings",
+                        "source_type": "Organization",
+                    }
+                ]
+            if url.endswith("/rules/branches/main"):
+                return [
+                    {
+                        "type": rule_type,
+                        "ruleset_id": 7,
+                        "ruleset_source": "szl-holdings",
+                    }
+                    for rule_type in (
+                        "pull_request",
+                        "non_fast_forward",
+                        "required_linear_history",
+                    )
+                ]
             if url.endswith("/branches/main"):
                 return {"commit": {"sha": SOURCE_SHA}}
-            if url.endswith("/rulesets?includes_parents=true"):
-                return [{"id": 7, "enforcement": "active"}]
             if url.endswith("/rulesets/7"):
-                return {
-                    "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
-                    "rules": [
-                        {"type": "pull_request"},
-                        {"type": "non_fast_forward"},
-                        {"type": "required_linear_history"},
-                    ],
-                    "bypass_actors": [],
-                }
+                return {"bypass_actors": []}
             raise AssertionError(url)
 
         environment = {
@@ -218,15 +321,15 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             authorization = require_governed_main(SOURCE_SHA)
             self.assertEqual(authorization["ruleset_ids"], [7])
 
-        def bypassed(url: str, token: str = "") -> object:
+        def undisclosed(url: str, token: str = "") -> object:
             value = response(url, token)
             if url.endswith("/rulesets/7"):
-                value["bypass_actors"] = [{"actor_type": "OrganizationAdmin"}]
+                value.pop("bypass_actors")
             return value
 
         with mock.patch.dict("os.environ", environment, clear=True), mock.patch(
-            "scripts.deploy_hf_space._request_json", side_effect=bypassed
-        ), self.assertRaisesRegex(RuntimeError, "no-bypass"):
+            "scripts.deploy_hf_space._request_json", side_effect=undisclosed
+        ), self.assertRaisesRegex(RuntimeError, "bypass actors were not disclosed"):
             require_governed_main(SOURCE_SHA)
 
     def test_public_attestation_binds_exact_revision_bytes_and_provenance(self) -> None:
@@ -267,7 +370,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     return 200, (bundle / relative).read_bytes()
                 if "SPACE_PROVENANCE.json" in url:
                     return 200, (bundle / "SPACE_PROVENANCE.json").read_bytes()
-                return 200, b"\u003chtml>operational</html>"
+                return 200, b"<html>operational</html>"
 
             with mock.patch(
                 "scripts.deploy_hf_space._request_json", side_effect=hf_json
@@ -281,13 +384,28 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     attestation,
                     timeout=1,
                 )
+            self.assertEqual(evidence["schema"], "szl.hf-live-attestation/v2")
             self.assertEqual(evidence["status"], "MEASURED")
             self.assertEqual(evidence["hf_revision"], target_sha)
-            self.assertEqual(evidence["files_verified"], len(expected_paths))
-            self.assertTrue(evidence["public_source_identity"])
+            self.assertEqual(evidence["source_revision"], SOURCE_SHA)
+            self.assertEqual(evidence["target"], HF_REPO)
+            self.assertEqual(evidence["runtime_stage"], "RUNNING")
+            self.assertEqual(evidence["file_count"], len(expected_paths))
+            self.assertRegex(evidence["bundle_sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(evidence["tree_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                evidence["public_provenance"],
+                {
+                    "schema": "szl.deployment-source/v3",
+                    "source_revision": SOURCE_SHA,
+                    "relation": "source-bound-release-bundle",
+                    "verified": True,
+                },
+            )
             self.assertEqual(
                 json.loads(attestation.read_text(encoding="utf-8")), evidence
             )
+            self.assertEqual(attestation.read_bytes(), canonical_json(evidence))
 
 
 if __name__ == "__main__":
