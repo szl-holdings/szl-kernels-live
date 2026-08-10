@@ -85,29 +85,13 @@ jobs:
           path: .terminal-actions/upload-artifact
           persist-credentials: false
           fetch-depth: 1
-      - name: Mint least-privilege governed ruleset reader
-        id: governance-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.QILLQAQ_CLIENT_ID }}
-          private-key: ${{ secrets.QILLQAQ_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-administration: read
-          permission-contents: read
-      - name: Require governed ruleset reader token
-        env:
-          GOVERNANCE_TOKEN: ${{ steps.governance-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          test -n "$GOVERNANCE_TOKEN"
       - name: Attest deployment manifest
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: ${{ runner.temp }}/hf-bundle/hf-deploy-manifest.json
       - name: Reauthorize exact protected main before credential use
         env:
-          GOVERNANCE_TOKEN: ${{ steps.governance-token.outputs.token }}
+          GOVERNANCE_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -154,7 +138,7 @@ jobs:
       - name: Publish and measure exact protected-main bundle
         id: publish-measure
         env:
-          GOVERNANCE_TOKEN: ${{ steps.governance-token.outputs.token }}
+          GOVERNANCE_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail

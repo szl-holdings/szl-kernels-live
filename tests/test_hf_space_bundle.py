@@ -300,38 +300,22 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
         self.assertIn('test "$live_sha" = "$GITHUB_SHA"', workflow)
         self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', workflow)
         self.assertIn("persist-credentials: false", workflow)
-        governance_action = (
-            "actions/create-github-app-token@"
-            "bcd2ba49218906704ab6c1aa796996da409d3eb1"
-        )
-        self.assertIn(governance_action, workflow)
-        self.assertIn("client-id: ${{ vars.QILLQAQ_CLIENT_ID }}", workflow)
-        self.assertIn(
-            "private-key: ${{ secrets.QILLQAQ_PRIVATE_KEY }}", workflow
-        )
-        self.assertIn("owner: ${{ github.repository_owner }}", workflow)
-        self.assertIn("repositories: ${{ github.event.repository.name }}", workflow)
-        self.assertIn("permission-administration: read", workflow)
-        self.assertIn("permission-contents: read", workflow)
-        self.assertEqual(workflow.count("          permission-"), 2)
-        self.assertGreaterEqual(
-            workflow.count(
-                "GOVERNANCE_TOKEN: ${{ steps.governance-token.outputs.token }}"
-            ),
-            3,
-        )
-        self.assertNotIn("GITHUB_TOKEN: ${{ github.token }}", workflow)
-        self.assertNotIn("GH_TOKEN: ${{ github.token }}", workflow)
-        mint_governance = workflow.index(
-            "Mint least-privilege governed ruleset reader"
-        )
-        require_governance = workflow.index(
-            "Require governed ruleset reader token"
-        )
+        native_governance = "GOVERNANCE_TOKEN: ${{ github.token }}"
+        self.assertGreaterEqual(workflow.count(native_governance), 2)
+        for legacy_marker in (
+            "actions/create-github-app-token@",
+            "QILLQAQ_CLIENT_ID",
+            "QILLQAQ_PRIVATE_KEY",
+            "permission-administration:",
+            "permission-contents:",
+            "steps.governance-token.outputs.token",
+        ):
+            self.assertNotIn(legacy_marker, workflow)
+        self.assertNotIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}", workflow)
+        guard_governance = workflow.index(native_governance, guard)
         hf_credential = workflow.index("HF_TOKEN: ${{ secrets.HF_TOKEN }}")
-        self.assertLess(mint_governance, require_governance)
-        self.assertLess(require_governance, guard)
-        self.assertLess(guard, hf_credential)
+        self.assertLess(guard, guard_governance)
+        self.assertLess(guard_governance, hf_credential)
         self.assertIn('test -n "$GOVERNANCE_TOKEN"', workflow)
         self.assertIn('--result "$RUNNER_TEMP/hf-deploy-result.json"', workflow)
         self.assertIn(
