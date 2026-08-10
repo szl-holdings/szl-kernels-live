@@ -1511,6 +1511,23 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 inject_hf_window(immutable_index, injection),
                 immutable_index,
             )
+            manifest_bytes = (bundle / "hf-deploy-manifest.json").read_bytes()
+            complete_tree = [
+                {
+                    "path": row["path"],
+                    "bytes": row["bytes"],
+                    "sha256": row["sha256"],
+                }
+                for row in manifest["files"]
+            ]
+            complete_tree.append(
+                {
+                    "path": "hf-deploy-manifest.json",
+                    "bytes": len(manifest_bytes),
+                    "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                }
+            )
+            complete_tree.sort(key=lambda row: row["path"])
             measured = {
                 "schema": "szl.hf-live-attestation/v2",
                 "status": "MEASURED",
@@ -1520,21 +1537,9 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 "target": HF_REPO,
                 "runtime_stage": "RUNNING",
                 "bundle_sha256": manifest["bundle_sha256"],
-                "file_count": manifest["file_count"],
+                "file_count": len(complete_tree),
                 "tree_sha256": hashlib.sha256(
-                    canonical_json(
-                        sorted(
-                            (
-                                {
-                                    "path": row["path"],
-                                    "bytes": row["bytes"],
-                                    "sha256": row["sha256"],
-                                }
-                                for row in manifest["files"]
-                            ),
-                            key=lambda row: row["path"],
-                        )
-                    )
+                    canonical_json(complete_tree)
                 ).hexdigest(),
                 "public_index": public_index,
                 "public_provenance": {
@@ -2207,3 +2212,58 @@ if __name__ == "__main__":
     unittest.main()
     normalize_public_static_index,
     synthesize_oidc_receipt,
+
+def _load_frontier_deploy_contract() -> dict[str, object]:
+    import runpy
+    from pathlib import Path
+
+    return runpy.run_path(
+        str(
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "deploy_hf_space.py"
+        )
+    )
+
+
+def test_manifest_tree_contract_includes_exact_self_manifest_bytes(tmp_path) -> None:
+    import json
+
+    contract = _load_frontier_deploy_contract()
+    manifest_bytes = (
+        b'{"file_count":1,"files":['
+        b'{"bytes":3,"path":"app.py","sha256":"'
+        + (b"0" * 64)
+        + b'"}]}'
+    )
+    manifest = json.loads(manifest_bytes)
+    manifest_path = tmp_path / "hf-deploy-manifest.json"
+    manifest_path.write_bytes(manifest_bytes)
+
+    tree_without_manifest = contract["_manifest_tree_sha256"](manifest)
+    tree_with_manifest = contract["_manifest_tree_sha256"](
+        manifest,
+        bundle=tmp_path,
+    )
+
+    assert tree_with_manifest != tree_without_manifest
+    assert contract["_manifest_contract_file_count"](
+        manifest,
+        bundle=tmp_path,
+    ) == 2
+
+    manifest_path.write_bytes(manifest_bytes + b"\n")
+    assert contract["_manifest_tree_sha256"](
+        manifest,
+        bundle=tmp_path,
+    ) != tree_with_manifest
+
+
+def test_bounded_attestation_mode_is_exact_build_provenance() -> None:
+    contract = _load_frontier_deploy_contract()
+    descriptor = contract["BOUNDED_ACTIONS"]["attest-build-provenance"]
+
+    assert descriptor["mode"] == "build-provenance"
+    assert descriptor["defaults"]["predicate-type"] == ""
+    assert descriptor["defaults"]["predicate"] == ""
+    assert descriptor["defaults"]["predicate-path"] == ""

@@ -58,6 +58,9 @@ DEADLINE_ACTION_INPUT_PREFIX = "DEADLINE_ACTION_INPUT_"
 BOUNDED_NODE_VERSION = "24.19.0"
 BOUNDED_ACTIONS = {
     "attest-build-provenance": {
+        # The pinned wrapper delegates empty custom-predicate inputs to
+        # actions/attest, whose pinned runtime selects SLSA build provenance.
+        "mode": "build-provenance",
         "entry": ".terminal-actions/attest/dist/index.js",
         "sha256": "b8b1ab02d45833f537b3622cccfdfbc27c5523f232de324a51c22e465e8c6353",
         "contract": ".terminal-actions/attest-build-provenance/action.yml",
@@ -396,6 +399,16 @@ def run_bounded_action(
     for name, expected in descriptor["defaults"].items():
         if inputs.get(name) != expected:
             raise RuntimeError("bounded external action defaults are not exact")
+    if action == "attest-build-provenance":
+        if descriptor.get("mode") != "build-provenance":
+            raise RuntimeError("bounded attestation mode is not exact")
+        if any(
+            inputs[name]
+            for name in ("predicate-type", "predicate", "predicate-path")
+        ):
+            raise RuntimeError(
+                "bounded build provenance must use the pinned runtime default"
+            )
     for name, value in inputs.items():
         child_environment[f"INPUT_{name.upper()}"] = value
     for secret_name in ("HF_TOKEN", "GOVERNANCE_TOKEN", "GH_TOKEN"):
@@ -1911,22 +1924,50 @@ def _is_exact_public_index_proof(value: object) -> bool:
     )
 
 
-def _manifest_tree_sha256(manifest: dict[str, object]) -> str:
+def _manifest_tree_sha256(
+    manifest: dict[str, object],
+    *,
+    bundle: Path | None = None,
+) -> str:
     entries = manifest.get("files")
     if not isinstance(entries, list) or not all(isinstance(row, dict) for row in entries):
         raise RuntimeError("revalidated manifest tree is malformed")
-    tree = sorted(
-        (
+    tree = [
+        {
+            "path": row["path"],
+            "bytes": row["bytes"],
+            "sha256": row["sha256"],
+        }
+        for row in entries
+    ]
+    if bundle is not None:
+        if any(row["path"] == "hf-deploy-manifest.json" for row in tree):
+            raise RuntimeError("revalidated manifest tree duplicates its manifest")
+        manifest_bytes = (bundle / "hf-deploy-manifest.json").read_bytes()
+        tree.append(
             {
-                "path": row["path"],
-                "bytes": row["bytes"],
-                "sha256": row["sha256"],
+                "path": "hf-deploy-manifest.json",
+                "bytes": len(manifest_bytes),
+                "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
             }
-            for row in entries
-        ),
-        key=lambda row: row["path"],
-    )
+        )
+    tree.sort(key=lambda row: row["path"])
     return hashlib.sha256(canonical_json(tree)).hexdigest()
+
+
+def _manifest_contract_file_count(
+    manifest: dict[str, object],
+    *,
+    bundle: Path | None = None,
+) -> object:
+    file_count = manifest.get("file_count")
+    if (
+        bundle is not None
+        and isinstance(file_count, int)
+        and not isinstance(file_count, bool)
+    ):
+        return file_count + 1
+    return file_count
 
 
 def _success_contract_violations(
@@ -1935,6 +1976,7 @@ def _success_contract_violations(
     measurement: dict[str, object],
     measurement_bytes: bytes,
     manifest: dict[str, object] | None = None,
+    bundle: Path | None = None,
 ) -> list[str]:
     expected_source = {
         "repository": SOURCE_REPO,
@@ -2011,7 +2053,7 @@ def _success_contract_violations(
     measurement_tree = measurement.get("tree_sha256")
     if not re.fullmatch(r"[0-9a-f]{64}", str(measurement_tree or "")):
         violations.append("measurement.tree_sha256")
-    elif manifest is not None and measurement_tree != _manifest_tree_sha256(manifest):
+    elif manifest is not None and measurement_tree != _manifest_tree_sha256(manifest, bundle=bundle):
         violations.append("cross.tree_sha256_manifest")
 
     public_index = measurement.get("public_index")
@@ -2022,7 +2064,7 @@ def _success_contract_violations(
             violations.append("cross.public_index_normalized_bytes")
         if public_index["normalized_sha256"] != expected_index.get("sha256"):
             violations.append("cross.public_index_normalized_sha256")
-    if manifest is not None and file_count != manifest.get("file_count"):
+    if manifest is not None and file_count != _manifest_contract_file_count(manifest, bundle=bundle):
         violations.append("cross.file_count_manifest")
     post_publication_main = measurement.get("post_publication_main")
     expected_post_publication_main = {
@@ -2066,6 +2108,7 @@ def _canonical_success_receipt(
         measurement,
         measurement_bytes,
         manifest,
+        bundle,
     )
     if violations:
         raise RuntimeError(
