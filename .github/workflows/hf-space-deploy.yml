@@ -760,7 +760,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/kernel-authorized-input"
           python -I -P scripts/deploy_hf_space.py bounded-action \
-            --action upload --reserve-seconds 30 --max-seconds 45
+            --action upload --reserve-seconds 60 --max-seconds 45
       - name: Enforce terminal publication evidence
         if: always()
         env:
