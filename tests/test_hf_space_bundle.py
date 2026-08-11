@@ -1211,9 +1211,11 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             )
         self.assertLess(time.monotonic() - started, 2.0)
 
-    def test_bounded_actions_receive_exact_wrapper_and_upload_runtime_inputs(self) -> None:
+    def test_bounded_actions_use_sealed_root_when_workspace_diverges(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            workspace = Path(temporary)
+            workspace = Path(temporary) / "sealed-input"
+            divergent_workspace = Path(temporary) / "checkout"
+            divergent_workspace.mkdir(parents=True)
             captured: dict[str, dict[str, str]] = {}
 
             def invoke(action: str, declared: dict[str, str]) -> dict[str, str]:
@@ -1230,7 +1232,7 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     digests[contract.resolve()] = descriptor["contract_sha256"]
 
                 environment = {
-                    "GITHUB_WORKSPACE": str(workspace),
+                    "GITHUB_WORKSPACE": str(divergent_workspace),
                     "HF_TERMINAL_DEADLINE_EPOCH": str(int(time.time()) + 600),
                     "HF_TOKEN": "must-not-reach-action",
                     "GOVERNANCE_TOKEN": "must-not-reach-action",
@@ -1241,6 +1243,9 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                     captured[action] = environment
 
                 with mock.patch.dict(os.environ, environment, clear=True), mock.patch(
+                    "scripts.deploy_hf_space.__file__",
+                    str(workspace / "scripts" / "deploy_hf_space.py"),
+                ), mock.patch(
                     "scripts.deploy_hf_space.sha256_file",
                     side_effect=lambda path: digests[path.resolve()],
                 ), mock.patch(
@@ -1270,6 +1275,8 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
             )
             for name, value in BOUNDED_ACTIONS["upload"]["defaults"].items():
                 self.assertEqual(upload[f"INPUT_{name.upper()}"], value)
+
+            self.assertNotEqual(workspace.resolve(), divergent_workspace.resolve())
 
             attest = invoke(
                 "attest-build-provenance",
@@ -1301,6 +1308,27 @@ class HuggingFaceSpaceBundleTests(unittest.TestCase):
                 self.assertFalse(
                     any(name.startswith("DEADLINE_ACTION_") for name in environment)
                 )
+
+    def test_only_exact_attestation_step_receives_oidc_request_credentials(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "hf-space-deploy.yml"
+        ).read_text(encoding="utf-8")
+        attest = workflow[workflow.index("  attest:\n") :]
+        steps = re.split(r"(?m)^      - ", attest.split("    steps:\n", 1)[1])[1:]
+        exact_attestor = "name: Attest canonical final success receipt bytes"
+        observed_exact = 0
+        for step in steps:
+            if exact_attestor in step:
+                observed_exact += 1
+                self.assertNotIn('ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""', step)
+                self.assertNotIn('ACTIONS_ID_TOKEN_REQUEST_URL: ""', step)
+            else:
+                self.assertIn('ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""', step)
+                self.assertIn('ACTIONS_ID_TOKEN_REQUEST_URL: ""', step)
+        self.assertEqual(observed_exact, 1)
 
     def test_terminal_cleanup_is_behavioral_and_nonrecursive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

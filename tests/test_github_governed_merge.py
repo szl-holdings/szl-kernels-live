@@ -617,6 +617,71 @@ class GovernedMergeContractTests(unittest.TestCase):
                             SOURCE_SHA, event, root / "bounded.json"
                         )
 
+    def test_associated_pr_inventory_drift_fails_closed(self) -> None:
+        environment = {
+            "GITHUB_REPOSITORY": SOURCE_REPOSITORY,
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_TOKEN": "github-test-token",
+            "GITHUB_API_URL": "https://api.github.test",
+        }
+        for drift_read in (2, 3):
+            base = guard_responder()
+            associated_reads = 0
+
+            def respond(url: str, token: str = "", timeout: float = 30.0):
+                nonlocal associated_reads
+                if urllib.parse.urlparse(url).path.endswith(
+                    f"/commits/{SOURCE_SHA}/pulls"
+                ):
+                    associated_reads += 1
+                    rows = base(url, token, timeout)
+                    if associated_reads == drift_read:
+                        return [*rows, {"id": 999, "number": 999, "state": "open"}]
+                    return rows
+                return base(url, token, timeout)
+
+            with self.subTest(drift_read=drift_read), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                event = root / "event.json"
+                write_push_event(event)
+                with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+                    GOVERNANCE, "_request_json", side_effect=respond
+                ):
+                    with self.assertRaisesRegex(GOVERNANCE.GovernanceError, "inventory drifted"):
+                        GOVERNANCE.require_governed_main(
+                            SOURCE_SHA, event, root / "drifted.json"
+                        )
+
+    def test_final_protected_main_drift_fails_closed(self) -> None:
+        environment = {
+            "GITHUB_REPOSITORY": SOURCE_REPOSITORY,
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_TOKEN": "github-test-token",
+            "GITHUB_API_URL": "https://api.github.test",
+        }
+        base = guard_responder()
+        branch_reads = 0
+
+        def respond(url: str, token: str = "", timeout: float = 30.0):
+            nonlocal branch_reads
+            if url.endswith(f"/repos/{SOURCE_REPOSITORY}/branches/main"):
+                branch_reads += 1
+                if branch_reads == 2:
+                    return {"commit": {"sha": "f" * 40}, "protected": True}
+            return base(url, token, timeout)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            event = root / "event.json"
+            write_push_event(event)
+            with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+                GOVERNANCE, "_request_json", side_effect=respond
+            ):
+                with self.assertRaisesRegex(GOVERNANCE.GovernanceError, "main drifted"):
+                    GOVERNANCE.require_governed_main(
+                        SOURCE_SHA, event, root / "stale.json"
+                    )
+
     def test_workflows_enforce_four_non_overlapping_privilege_domains(self) -> None:
         release = (ROOT / ".github" / "workflows" / "hf-space-deploy.yml").read_text(
             encoding="utf-8"

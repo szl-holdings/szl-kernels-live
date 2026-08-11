@@ -367,21 +367,18 @@ def run_bounded_action(
         raise RetryExhausted("bounded external action reserve is exhausted")
     deadline = time.monotonic() + remaining
 
-    workspace_raw = os.environ.get("GITHUB_WORKSPACE", "")
-    if not workspace_raw:
-        raise RuntimeError("GITHUB_WORKSPACE is required for bounded external actions")
-    workspace = Path(workspace_raw).resolve()
+    sealed_root = Path(__file__).resolve().parents[1]
     descriptor = BOUNDED_ACTIONS[action]
-    entry = (workspace / str(descriptor["entry"])).resolve()
-    expected_entry = (workspace / str(descriptor["entry"])).resolve()
+    entry = (sealed_root / str(descriptor["entry"])).resolve()
+    expected_entry = (sealed_root / str(descriptor["entry"])).resolve()
     if entry != expected_entry or not entry.is_file() or entry.is_symlink():
         raise RuntimeError("bounded external action entry is missing or unsafe")
     if sha256_file(entry) != descriptor["sha256"]:
         raise RuntimeError("bounded external action entry digest differs")
     contract_relative = descriptor.get("contract")
     if contract_relative is not None:
-        contract = (workspace / str(contract_relative)).resolve()
-        expected_contract = (workspace / str(contract_relative)).resolve()
+        contract = (sealed_root / str(contract_relative)).resolve()
+        expected_contract = (sealed_root / str(contract_relative)).resolve()
         if (
             contract != expected_contract
             or not contract.is_file()

@@ -151,6 +151,11 @@ def _request_complete_list(
     raise GovernanceError(f"{label} inventory exceeded its fail-closed page bound")
 
 
+def _normalized_inventory(rows: list[dict[str, object]]) -> bytes:
+    """Canonicalize a complete inventory as an order-independent exact set."""
+    return canonical_json(sorted(rows, key=lambda row: int(row["id"])))
+
+
 def _job_id_from_url(value: object, run_id: int) -> int | None:
     if not isinstance(value, str):
         return None
@@ -684,12 +689,25 @@ def require_governed_main(
             raise GovernanceError(
                 f"refusing stale release: current main {live_sha} != source {source_sha}"
             )
-        associated, associated_pages = _request_complete_list(
-            f"{api_root}/repos/{SOURCE_REPO}/commits/{source_sha}/pulls",
+        associated_url = f"{api_root}/repos/{SOURCE_REPO}/commits/{source_sha}/pulls"
+        associated_first, associated_first_pages = _request_complete_list(
+            associated_url,
             token,
             deadline=deadline,
-            label="associated pull-request readback",
+            label="associated pull-request initial readback",
         )
+        associated, associated_pages = _request_complete_list(
+            associated_url,
+            token,
+            deadline=deadline,
+            label="associated pull-request confirming readback",
+        )
+        associated_snapshot = _normalized_inventory(associated)
+        if (
+            associated_first_pages != associated_pages
+            or _normalized_inventory(associated_first) != associated_snapshot
+        ):
+            raise GovernanceError("associated pull-request inventory drifted during authorization")
         candidates = [
             row
             for row in associated
@@ -812,6 +830,33 @@ def require_governed_main(
             label="exact-head check-run readback",
         )
         checks = _require_successful_checks(check_runs, head_sha, release_workflow)
+        associated_final, associated_final_pages = _request_complete_list(
+            associated_url,
+            token,
+            deadline=deadline,
+            label="associated pull-request final readback",
+        )
+        if (
+            associated_final_pages != associated_pages
+            or _normalized_inventory(associated_final) != associated_snapshot
+        ):
+            raise GovernanceError("associated pull-request inventory drifted before receipt")
+        final_branch = _request_json_retry(
+            f"{api_root}/repos/{SOURCE_REPO}/branches/main",
+            token,
+            deadline=deadline,
+            label="final protected-main revision readback",
+        )
+        final_live_sha = exact_sha(
+            ((final_branch if isinstance(final_branch, dict) else {}).get("commit") or {}).get("sha"),
+            "final protected-main revision",
+        )
+        if (
+            not isinstance(final_branch, dict)
+            or final_branch.get("protected") is not True
+            or final_live_sha != source_sha
+        ):
+            raise GovernanceError("protected main drifted before authorization receipt")
         evidence = {
             "schema": "szl.github-governed-merge/v3",
             "status": GOVERNED_MAIN_STATUS,
