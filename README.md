@@ -166,3 +166,51 @@ Do not replace the revision with `main` in production or demonstrations.
 
 Apache-2.0 for this registry, verifier, tests, and site. Each kernel retains the
 license published with its own artifact.
+
+<!-- series-a-release-security-v2 -->
+## Series A release security model
+
+The kernel Space publisher is deliberately frozen until external Hugging Face
+capacity is available. A successful pull request or local test run is not a
+deployment receipt and must not be presented as one.
+
+The main-branch release path has four step-isolated credential domains:
+
+1. **Authorize:** GitHub read access only. It consumes the complete paginated
+   associated-pull-request inventory and accepts one exact merged tuple. It
+   binds checks to the complete job inventory for the selected workflow run
+   attempt, including the pinned kernel workflow and external required
+   workflow. Direct pushes, stale attempts, mixed-attempt jobs, spoofed app
+   identities, and incomplete API inventories fail closed.
+2. **Deploy:** Hugging Face mutation credential only. It consumes a
+   source-sealed `szl.kernel-authorized-input/v1` tree whose manifest digest is
+   carried outside the artifact and verified before dependencies or artifact
+   code execute. It performs unauthenticated public-main readback immediately
+   before the upload marker and again after mutation, then emits canonical
+   success or mutation-uncertainty evidence. GitHub API, OIDC, and Actions
+   runtime credentials are explicitly absent from the publisher interpreter.
+3. **Measure:** GitHub read access plus public HTTPS only. It independently
+   verifies the exact live revision and bytes, then re-authorizes the unchanged
+   main revision. The Hugging Face, OIDC, and Actions runtime credentials are
+   explicitly absent from the measurement interpreter.
+4. **Attest:** GitHub OIDC and attestation permissions only. OIDC is exposed
+   only to the bounded attestation runtime, while Actions artifact credentials
+   are exposed only to bounded evidence-upload runtimes. It can mint a
+   terminal receipt only from exact authorization, mutation, public
+   measurement, and post-publication authorization evidence. The Hugging Face
+   credential is explicitly absent.
+
+Validation is standard-library-only and does not install publisher
+dependencies. Publication dependencies remain hash-pinned in the isolated
+deploy job. Action sources are commit-pinned and copied as an exact allowlist,
+evidence artifacts are run-attempt-qualified and short-lived, diagnostics are
+sanitized, and no ruleset-administration endpoint is queried by the release
+path. Terminal failures distinguish `PUBLISHER_EVIDENCE_TRANSPORT` from
+`MEASUREMENT_EVIDENCE_TRANSPORT`; neither can be promoted to deployment
+success.
+
+Current operational status: **FROZEN / AWAITING EXTERNAL CAPACITY**. No queued
+or failed run may be replayed as proof of publication. Release status becomes
+live only after a new exact governed merge produces hosted checks, immutable
+artifacts, public readback, OIDC attestation, and exact-main readback for the
+same source revision.

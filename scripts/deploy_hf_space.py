@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -22,13 +23,10 @@ import urllib.request
 HF_REPO = "SZLHOLDINGS/szl-kernels-live"
 SOURCE_REPO = "szl-holdings/szl-kernels-live"
 SOURCE_RELATION = "source-bound-release-bundle"
+AUTHORIZED_INPUT_SCHEMA = "szl.kernel-authorized-input/v1"
+PUBLIC_MAIN_SCHEMA = "szl.github-public-main-readback/v1"
+PUBLIC_MAIN_URL = f"https://api.github.com/repos/{SOURCE_REPO}/branches/main"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
-REQUIRED_RULE_TYPES = {"pull_request", "non_fast_forward", "required_linear_history"}
-GOVERNED_RULESET_ID = 17630223
-GOVERNED_RULESET_NAME = "org-default-branch-protection"
-GOVERNED_RULESET_SOURCE = "szl-holdings"
-GOVERNED_RULESET_SOURCE_TYPE = "Organization"
-GOVERNED_REPOSITORY_ID = 1295941334
 TERMINAL_STAGES = {"BUILD_ERROR", "CONFIG_ERROR", "RUNTIME_ERROR"}
 PENDING_STAGES = {"BUILDING", "APP_STARTING", "STARTING", "RUNNING_BUILDING"}
 TRANSIENT_HTTP_STATUS = frozenset({429, *range(500, 600)})
@@ -51,19 +49,32 @@ PUBLIC_INDEX_FIELDS = frozenset(
         "injection_sha256",
     }
 )
-GOVERNED_MAIN_STATUS = "AUTHORIZED_EXACT_PROTECTED_MAIN"
 TERMINAL_EVIDENCE_RESERVE_SECONDS = 600
 TERMINAL_DEADLINE_ENV = "HF_TERMINAL_DEADLINE_EPOCH"
 DEADLINE_ACTION_INPUT_PREFIX = "DEADLINE_ACTION_INPUT_"
 BOUNDED_NODE_VERSION = "24.19.0"
+ACTIONS_RUNTIME_CREDENTIALS = frozenset(
+    {
+        "ACTIONS_RUNTIME_TOKEN",
+        "ACTIONS_RUNTIME_URL",
+        "ACTIONS_RESULTS_URL",
+        "ACTIONS_CACHE_URL",
+    }
+)
+OIDC_CREDENTIALS = frozenset(
+    {"ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL"}
+)
+GITHUB_API_CREDENTIALS = frozenset(
+    {"GITHUB_TOKEN", "GH_TOKEN", "GOVERNANCE_TOKEN"}
+)
 BOUNDED_ACTIONS = {
     "attest-build-provenance": {
         # The pinned wrapper delegates empty custom-predicate inputs to
         # actions/attest, whose pinned runtime selects SLSA build provenance.
         "mode": "build-provenance",
-        "entry": ".terminal-actions/attest/dist/index.js",
+        "entry": "terminal-actions/attest/dist/index.js",
         "sha256": "b8b1ab02d45833f537b3622cccfdfbc27c5523f232de324a51c22e465e8c6353",
-        "contract": ".terminal-actions/attest-build-provenance/action.yml",
+        "contract": "terminal-actions/attest-build-provenance/action.yml",
         "contract_sha256": "61c3292878304ea717f372f6b6b7c0b5ae6a132b91622c97529b11d02ea8da4d",
         "inputs": frozenset(
             {
@@ -93,7 +104,7 @@ BOUNDED_ACTIONS = {
         },
     },
     "upload": {
-        "entry": ".terminal-actions/upload-artifact/dist/upload/index.js",
+        "entry": "terminal-actions/upload-artifact/dist/upload/index.js",
         "sha256": "eea594941d8ee535974e0fbc03bbdf567f3abc78194f224b93f2df9a887ee2e9",
         "inputs": frozenset(
             {
@@ -115,6 +126,20 @@ BOUNDED_ACTIONS = {
         },
     },
 }
+
+
+def _load_governance_module():
+    path = Path(__file__).with_name("github_governed_merge.py")
+    spec = importlib.util.spec_from_file_location("szl_kernel_governed_merge", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("governed-merge module cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+GOVERNANCE = _load_governance_module()
+GOVERNED_MAIN_STATUS = GOVERNANCE.GOVERNED_MAIN_STATUS
 
 
 class TransientReadError(RuntimeError):
@@ -411,7 +436,12 @@ def run_bounded_action(
             )
     for name, value in inputs.items():
         child_environment[f"INPUT_{name.upper()}"] = value
-    for secret_name in ("HF_TOKEN", "GOVERNANCE_TOKEN", "GH_TOKEN"):
+    scrubbed = frozenset({"HF_TOKEN"}) | GITHUB_API_CREDENTIALS
+    if action == "upload":
+        scrubbed |= OIDC_CREDENTIALS
+    else:
+        scrubbed |= ACTIONS_RUNTIME_CREDENTIALS
+    for secret_name in scrubbed:
         child_environment.pop(secret_name, None)
 
     _run_bounded_process(
@@ -447,221 +477,6 @@ def _request_json_retry(
         deadline=deadline,
         label=label,
     )
-
-
-def _exact_pull_request_parameters() -> dict[str, object]:
-    return {
-        "required_approving_review_count": 0,
-        "dismiss_stale_reviews_on_push": True,
-        "required_reviewers": [],
-        "require_code_owner_review": False,
-        "require_last_push_approval": False,
-        "required_review_thread_resolution": True,
-        "allowed_merge_methods": ["squash", "rebase"],
-    }
-
-
-def _exact_baseline_detail(detail: object) -> bool:
-    if not isinstance(detail, dict):
-        return False
-    if any(
-        (
-            detail.get("id") != GOVERNED_RULESET_ID,
-            detail.get("name") != GOVERNED_RULESET_NAME,
-            detail.get("target") != "branch",
-            detail.get("source") != GOVERNED_RULESET_SOURCE,
-            detail.get("source_type") != GOVERNED_RULESET_SOURCE_TYPE,
-            detail.get("enforcement") != "active",
-            detail.get("bypass_actors") != [],
-            detail.get("conditions")
-            != {
-                "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]},
-                "repository_name": {"exclude": [], "include": ["~ALL"]},
-            },
-        )
-    ):
-        return False
-    rules = detail.get("rules")
-    if not isinstance(rules, list) or len(rules) != 3:
-        return False
-    indexed = {
-        row.get("type"): row
-        for row in rules
-        if isinstance(row, dict) and isinstance(row.get("type"), str)
-    }
-    return indexed == {
-        "pull_request": {
-            "type": "pull_request",
-            "parameters": _exact_pull_request_parameters(),
-        },
-        "non_fast_forward": {"type": "non_fast_forward"},
-        "required_linear_history": {"type": "required_linear_history"},
-    }
-
-
-def evaluate_effective_rulesets(
-    summaries: object,
-    details: dict[int, object],
-    effective_rules: object,
-) -> tuple[list[int], list[str]]:
-    """Prove the exact inherited baseline while permitting additional stronger rulesets."""
-    if not isinstance(summaries, list):
-        raise RuntimeError("repository ruleset inventory is unavailable")
-    if not isinstance(effective_rules, list):
-        raise RuntimeError("effective default-branch rules are unavailable")
-    diagnostics: list[str] = []
-    inventory = [
-        row
-        for row in summaries
-        if isinstance(row, dict) and row.get("id") == GOVERNED_RULESET_ID
-    ]
-    if len(inventory) != 1:
-        diagnostics.append(
-            f"ruleset {GOVERNED_RULESET_ID}: exact inventory row is not unique"
-        )
-        return [], diagnostics
-
-    summary = inventory[0]
-    if summary.get("name") != GOVERNED_RULESET_NAME:
-        diagnostics.append("inventory name is not org-default-branch-protection")
-    if summary.get("target") != "branch":
-        diagnostics.append("inventory target is not branch")
-    if summary.get("enforcement") != "active":
-        diagnostics.append("inventory enforcement is not active")
-    if summary.get("source") != GOVERNED_RULESET_SOURCE:
-        diagnostics.append("inventory source is not szl-holdings")
-    if summary.get("source_type") != GOVERNED_RULESET_SOURCE_TYPE:
-        diagnostics.append("inventory source_type is not Organization")
-
-    detail = details.get(GOVERNED_RULESET_ID)
-    if not _exact_baseline_detail(detail):
-        diagnostics.append("baseline ruleset detail is not exact")
-
-    observed_types: set[object] = set()
-    baseline_rows = [
-        (index, row)
-        for index, row in enumerate(effective_rules, start=1)
-        if isinstance(row, dict) and row.get("ruleset_id") == GOVERNED_RULESET_ID
-    ]
-    if not baseline_rows:
-        diagnostics.append("no effective baseline rule rows were disclosed")
-    for index, row in baseline_rows:
-        if not isinstance(row, dict):
-            diagnostics.append(f"effective row {index} is not an object")
-            continue
-        if row.get("ruleset_source") != GOVERNED_RULESET_SOURCE:
-            diagnostics.append(f"effective row {index} has a mixed or missing source")
-        if row.get("ruleset_source_type") != GOVERNED_RULESET_SOURCE_TYPE:
-            diagnostics.append(
-                f"effective row {index} has a mixed or missing source_type"
-            )
-        observed_types.add(row.get("type"))
-    missing_types = sorted(REQUIRED_RULE_TYPES - observed_types)
-    if missing_types:
-        diagnostics.append("missing effective rules: " + ", ".join(missing_types))
-    if len(baseline_rows) != len(REQUIRED_RULE_TYPES):
-        diagnostics.append("effective baseline rows are not an exact three-rule projection")
-    pull_rows = [row for _, row in baseline_rows if row.get("type") == "pull_request"]
-    if len(pull_rows) != 1 or pull_rows[0].get("parameters") != _exact_pull_request_parameters():
-        diagnostics.append("effective pull request parameters are not exact")
-
-    if diagnostics:
-        return [], [
-            f"ruleset {GOVERNED_RULESET_ID}: " + "; ".join(diagnostics)
-        ]
-    return [GOVERNED_RULESET_ID], []
-
-
-def require_governed_main(
-    source_sha: str,
-    *,
-    deadline: float | None = None,
-) -> dict[str, object]:
-    source_sha = exact_sha(source_sha, "workflow source")
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    source_ref = os.environ.get("GITHUB_REF", "")
-    token = os.environ.get("GOVERNANCE_TOKEN", "")
-    api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
-    if repository != SOURCE_REPO:
-        raise RuntimeError(f"unexpected GitHub repository: {repository!r}")
-    if source_ref != "refs/heads/main":
-        raise RuntimeError(f"refusing production release from {source_ref!r}")
-    if not token:
-        raise RuntimeError(
-            "GOVERNANCE_TOKEN is required for protected-main reauthorization"
-        )
-
-    if deadline is None:
-        deadline = time.monotonic() + 150
-
-    metadata = _request_json_retry(
-        f"{api_root}/repos/{repository}",
-        deadline=deadline,
-        label="repository identity readback",
-        token=token,
-    )
-    if not isinstance(metadata, dict) or (
-        metadata.get("id") != GOVERNED_REPOSITORY_ID
-        or metadata.get("full_name") != SOURCE_REPO
-        or metadata.get("default_branch") != "main"
-    ):
-        raise RuntimeError("repository identity/default branch is not exact")
-    branch = _request_json_retry(
-        f"{api_root}/repos/{repository}/branches/main",
-        deadline=deadline,
-        label="protected-main revision readback",
-        token=token,
-    )
-    if not isinstance(branch, dict) or branch.get("protected") is not True:
-        raise RuntimeError("repository main branch is not protected")
-    live_sha = exact_sha(
-        ((branch if isinstance(branch, dict) else {}).get("commit") or {}).get("sha"),
-        "current protected-main revision",
-    )
-    if live_sha != source_sha:
-        raise RuntimeError(
-            f"refusing stale release: current main {live_sha} != source {source_sha}"
-        )
-
-    summaries = _request_json_retry(
-        f"{api_root}/repos/{repository}/rulesets?includes_parents=true",
-        deadline=deadline,
-        label="effective ruleset summary readback",
-        token=token,
-    )
-    effective_rules = _request_json_retry(
-        f"{api_root}/repos/{repository}/rules/branches/main",
-        deadline=deadline,
-        label="effective branch-rule readback",
-        token=token,
-    )
-    details: dict[int, object] = {}
-    try:
-        details[GOVERNED_RULESET_ID] = _request_json_retry(
-            f"{api_root}/repos/{repository}/rulesets/{GOVERNED_RULESET_ID}",
-            deadline=deadline,
-            label="governed ruleset detail readback",
-            token=token,
-        )
-    except Exception as error:
-        details[GOVERNED_RULESET_ID] = {
-            "_retrieval_error": type(error).__name__
-        }
-    accepted, diagnostics = evaluate_effective_rulesets(
-        summaries,
-        details,
-        effective_rules,
-    )
-    if not accepted:
-        raise RuntimeError(
-            "default branch policy could not be proven; "
-            + " | ".join(diagnostics or ["no ruleset candidates were disclosed"])
-        )
-    return {
-        "status": GOVERNED_MAIN_STATUS,
-        "source_revision": source_sha,
-        "ruleset_ids": accepted,
-    }
 
 
 def validate_bundle(bundle: Path, source_sha: str) -> dict[str, object]:
@@ -737,6 +552,180 @@ def validate_bundle(bundle: Path, source_sha: str) -> dict[str, object]:
     return manifest
 
 
+def _safe_authorized_relative(path: str) -> PurePosixPath:
+    relative = PurePosixPath(path)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or ".." in relative.parts
+        or any(part.startswith(".") for part in relative.parts)
+    ):
+        raise RuntimeError("authorized input contains an unsafe path")
+    return relative
+
+
+def _authorized_input_entries(root: Path, manifest_path: Path) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        if path == manifest_path:
+            continue
+        if path.is_symlink():
+            raise RuntimeError("authorized input contains a symbolic path")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError("authorized input contains a non-regular path")
+        relative = path.relative_to(root).as_posix()
+        _safe_authorized_relative(relative)
+        entries.append(
+            {"path": relative, "bytes": path.stat().st_size, "sha256": sha256_file(path)}
+        )
+    return entries
+
+
+def seal_authorized_input(root: Path, source_sha: str, manifest_path: Path) -> dict[str, object]:
+    source_sha = exact_sha(source_sha, "authorized input source")
+    root = root.resolve()
+    manifest_path = manifest_path.resolve()
+    if not root.is_dir() or manifest_path.parent != root or manifest_path.exists():
+        raise RuntimeError("authorized input seal location is not exact")
+    entries = _authorized_input_entries(root, manifest_path)
+    manifest = {
+        "schema": AUTHORIZED_INPUT_SCHEMA,
+        "source_revision": source_sha,
+        "file_count": len(entries),
+        "files": entries,
+        "tree_sha256": sha256_bytes(canonical_json(entries)),
+    }
+    manifest_path.write_bytes(canonical_json(manifest))
+    return manifest
+
+
+def validate_authorized_input(
+    root: Path,
+    source_sha: str,
+    expected_manifest_sha256: str,
+) -> dict[str, object]:
+    source_sha = exact_sha(source_sha, "authorized input source")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha256):
+        raise RuntimeError("authorized input manifest digest is malformed")
+    root = root.resolve()
+    manifest_path = root / "authorized-input-manifest.json"
+    if not root.is_dir() or manifest_path.is_symlink() or not manifest_path.is_file():
+        raise RuntimeError("authorized input manifest is missing or unsafe")
+    if any(path.is_symlink() for path in root.rglob("*")):
+        raise RuntimeError("authorized input contains a symbolic path")
+    raw = manifest_path.read_bytes()
+    if sha256_bytes(raw) != expected_manifest_sha256:
+        raise RuntimeError("authorized input manifest digest differs")
+    try:
+        manifest = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("authorized input manifest is malformed") from error
+    if (
+        not isinstance(manifest, dict)
+        or raw != canonical_json(manifest)
+        or set(manifest) != {"schema", "source_revision", "file_count", "files", "tree_sha256"}
+        or manifest.get("schema") != AUTHORIZED_INPUT_SCHEMA
+        or manifest.get("source_revision") != source_sha
+        or not isinstance(manifest.get("files"), list)
+        or type(manifest.get("file_count")) is not int
+        or manifest["file_count"] != len(manifest["files"])
+    ):
+        raise RuntimeError("authorized input manifest contract is not exact")
+    observed_paths: set[str] = set()
+    for entry in manifest["files"]:
+        if not isinstance(entry, dict) or set(entry) != {"path", "bytes", "sha256"}:
+            raise RuntimeError("authorized input manifest entry is malformed")
+        relative = _safe_authorized_relative(str(entry.get("path", "")))
+        normalized = relative.as_posix()
+        if normalized in observed_paths:
+            raise RuntimeError("authorized input manifest contains a duplicate path")
+        observed_paths.add(normalized)
+        path = root.joinpath(*relative.parts)
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("authorized input file is missing or unsafe")
+        if type(entry.get("bytes")) is not int or entry["bytes"] != path.stat().st_size:
+            raise RuntimeError("authorized input byte count differs")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", ""))):
+            raise RuntimeError("authorized input file digest is malformed")
+        if sha256_file(path) != entry["sha256"]:
+            raise RuntimeError("authorized input file digest differs")
+    actual = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and path != manifest_path
+    }
+    if actual != observed_paths:
+        raise RuntimeError("authorized input tree is not closed by its manifest")
+    if manifest.get("tree_sha256") != sha256_bytes(canonical_json(manifest["files"])):
+        raise RuntimeError("authorized input tree digest differs")
+    return manifest
+
+
+def _public_main_readback_is_exact(value: object, source_sha: str) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value)
+        == {"schema", "transport", "repository", "ref", "revision", "protected"}
+        and value.get("schema") == PUBLIC_MAIN_SCHEMA
+        and value.get("transport") == "UNAUTHENTICATED_PUBLIC_GITHUB_API"
+        and value.get("repository") == SOURCE_REPO
+        and value.get("ref") == "refs/heads/main"
+        and value.get("revision") == source_sha
+        and value.get("protected") is True
+    )
+
+
+def _require_public_main_revision(source_sha: str, *, deadline: float) -> dict[str, object]:
+    source_sha = exact_sha(source_sha, "public main source")
+
+    def request_once() -> dict[str, object]:
+        request = urllib.request.Request(
+            PUBLIC_MAIN_URL,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": UA,
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        opener = urllib.request.build_opener(_NoRedirects)
+        with opener.open(request, timeout=_remaining_timeout(deadline, 20)) as response:
+            if response.status != 200 or response.geturl() != PUBLIC_MAIN_URL:
+                raise RuntimeError("public main readback did not terminate exactly")
+            payload = json.load(response)
+        commit = payload.get("commit") if isinstance(payload, dict) else None
+        revision = exact_sha(
+            commit.get("sha") if isinstance(commit, dict) else None,
+            "public main revision",
+        )
+        if not isinstance(payload, dict) or payload.get("protected") is not True:
+            raise RuntimeError("public main readback is not protected")
+        if revision != source_sha:
+            raise RuntimeError(f"current public main {revision} differs from source {source_sha}")
+        return {
+            "schema": PUBLIC_MAIN_SCHEMA,
+            "transport": "UNAUTHENTICATED_PUBLIC_GITHUB_API",
+            "repository": SOURCE_REPO,
+            "ref": "refs/heads/main",
+            "revision": source_sha,
+            "protected": True,
+        }
+
+    return _retry_transient(request_once, deadline=deadline, label="public main readback")
+
+
+def _load_public_main_readback(path: Path, source_sha: str) -> dict[str, object]:
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("public main readback evidence is unreadable") from error
+    if raw != canonical_json(value) or not _public_main_readback_is_exact(value, source_sha):
+        raise RuntimeError("public main readback evidence is not canonical and exact")
+    return value
+
+
 def _recover_authoritative_revision(
     bundle: Path,
     manifest: dict[str, object],
@@ -783,6 +772,43 @@ def _hf_upload_child_environment() -> dict[str, str]:
     if not token:
         raise RuntimeError("HF_TOKEN is required in the approved secret store")
     return {"HF_TOKEN": token}
+
+
+def _present_credentials(names: frozenset[str]) -> list[str]:
+    return sorted(name for name in names if os.environ.get(name))
+
+
+def _require_authorization_privilege_domain() -> None:
+    present = _present_credentials(
+        frozenset({"HF_TOKEN"}) | OIDC_CREDENTIALS | ACTIONS_RUNTIME_CREDENTIALS
+    )
+    if present:
+        raise RuntimeError(
+            "GitHub authorization received forbidden HF, OIDC, or runtime credentials: "
+            + ",".join(present)
+        )
+
+
+def _require_publisher_privilege_domain() -> None:
+    present = _present_credentials(
+        GITHUB_API_CREDENTIALS | OIDC_CREDENTIALS | ACTIONS_RUNTIME_CREDENTIALS
+    )
+    if present:
+        raise RuntimeError(
+            "HF publisher received forbidden GitHub or OIDC credentials: "
+            + ",".join(present)
+        )
+
+
+def _require_measurement_privilege_domain() -> None:
+    present = _present_credentials(
+        frozenset({"HF_TOKEN"}) | OIDC_CREDENTIALS | ACTIONS_RUNTIME_CREDENTIALS
+    )
+    if present:
+        raise RuntimeError(
+            "public measurement received forbidden HF or OIDC credentials: "
+            + ",".join(present)
+        )
 
 
 def _upload_call_entered_marker_is_exact(entered_marker: Path) -> bool:
@@ -861,6 +887,7 @@ def upload_child_main(argv: list[str]) -> int:
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--parent-sha", required=True)
     parser.add_argument("--entered-marker", type=Path, required=True)
+    parser.add_argument("--main-guard-result", type=Path, required=True)
     parser.add_argument("--child-result", type=Path, required=True)
     args = parser.parse_args(argv)
     source_sha = exact_sha(args.source_sha, "workflow source")
@@ -872,6 +899,13 @@ def upload_child_main(argv: list[str]) -> int:
     from huggingface_hub import HfApi
 
     api = HfApi(token=token)
+    pre_mutation_main = _require_public_main_revision(
+        source_sha,
+        deadline=time.monotonic() + 30,
+    )
+    args.main_guard_result.parent.mkdir(parents=True, exist_ok=True)
+    with args.main_guard_result.open("xb") as handle:
+        handle.write(canonical_json(pre_mutation_main))
     args.entered_marker.parent.mkdir(parents=True, exist_ok=True)
     with args.entered_marker.open("xb") as handle:
         handle.write(b"UPLOAD_CALL_ENTERED\n")
@@ -900,6 +934,9 @@ def deploy_bundle(
     result_path: Path,
     mutation_state: dict[str, object] | None = None,
     *,
+    authorization_path: Path,
+    authorized_input_root: Path | None = None,
+    authorized_input_manifest_sha256: str | None = None,
     mutation_timeout: float = MUTATION_TIMEOUT_SECONDS,
     deadline: float | None = None,
 ) -> dict[str, object]:
@@ -910,13 +947,28 @@ def deploy_bundle(
             "upload_call_entered": False,
             "authoritative_readback_attempted": False,
             "known_hf_revision": None,
+            "pre_mutation_main": None,
+            "post_mutation_main": None,
         }
     )
+    _require_publisher_privilege_domain()
     source_sha = exact_sha(source_sha, "workflow source")
     manifest = validate_bundle(bundle, source_sha)
+    authorization = GOVERNANCE.load_governed_merge(authorization_path, source_sha)
+    if (authorized_input_root is None) != (authorized_input_manifest_sha256 is None):
+        raise RuntimeError("authorized input root and manifest digest must be supplied together")
+    if authorized_input_root is not None and authorized_input_manifest_sha256 is not None:
+        validate_authorized_input(
+            authorized_input_root,
+            source_sha,
+            authorized_input_manifest_sha256,
+        )
+        input_manifest_sha256 = authorized_input_manifest_sha256
+    else:
+        # Direct low-level unit calls remain possible; production CLI requires both arguments.
+        input_manifest_sha256 = "0" * 64
     if deadline is None:
         deadline = time.monotonic() + mutation_timeout
-    authorization = require_governed_main(source_sha, deadline=deadline)
 
     child_environment = _hf_upload_child_environment()
     mutation_deadline = min(deadline, time.monotonic() + mutation_timeout)
@@ -929,11 +981,9 @@ def deploy_bundle(
         raise RuntimeError("pre-mutation Hugging Face response is malformed")
     before_sha = exact_sha(before.get("sha"), "observed Hugging Face parent revision")
 
-    mutation_authorization = require_governed_main(source_sha, deadline=deadline)
-    if mutation_authorization != authorization:
-        raise RuntimeError("protected-main authorization changed before publication")
+    mutation_authorization = authorization
     mutation_boundary = {
-        "schema": "szl.hf-deploy-result/v1",
+        "schema": "szl.hf-deploy-result/v3",
         "status": "MUTATION_CHILD_PREPARED",
         "source_revision": source_sha,
         "previous_hf_revision": before_sha,
@@ -941,6 +991,9 @@ def deploy_bundle(
         "bundle_sha256": manifest["bundle_sha256"],
         "target": HF_REPO,
         "authorization": mutation_authorization,
+        "authorized_input_manifest_sha256": input_manifest_sha256,
+        "pre_mutation_main": None,
+        "post_mutation_main": None,
     }
     result_path.parent.mkdir(parents=True, exist_ok=True)
     with result_path.open("xb") as handle:
@@ -948,6 +1001,7 @@ def deploy_bundle(
     nonce = f"{os.getpid()}-{time.monotonic_ns()}"
     entered_marker = result_path.parent / f".hf-upload-entered-{nonce}"
     child_result = result_path.parent / f".hf-upload-result-{nonce}.json"
+    main_guard_result = result_path.parent / f".github-main-guard-{nonce}.json"
     remaining = mutation_deadline - time.monotonic()
     recovery_reserve = min(MUTATION_READBACK_SECONDS, max(0.1, remaining / 4))
     upload_deadline = mutation_deadline - recovery_reserve
@@ -965,6 +1019,8 @@ def deploy_bundle(
         before_sha,
         "--entered-marker",
         str(entered_marker.resolve()),
+        "--main-guard-result",
+        str(main_guard_result.resolve()),
         "--child-result",
         str(child_result.resolve()),
     ]
@@ -977,11 +1033,18 @@ def deploy_bundle(
             environment=child_environment,
         )
         child_value = json.loads(child_result.read_text(encoding="utf-8"))
+        pre_mutation_main = _load_public_main_readback(main_guard_result, source_sha)
+        mutation_state["pre_mutation_main"] = pre_mutation_main
         target_sha = exact_sha(
             child_value.get("hf_revision") if isinstance(child_value, dict) else None,
             "published Hugging Face revision",
         )
     except Exception as upload_error:
+        if main_guard_result.is_file():
+            mutation_state["pre_mutation_main"] = _load_public_main_readback(
+                main_guard_result,
+                source_sha,
+            )
         upload_call_entered = _upload_call_entered_marker_is_exact(entered_marker)
         mutation_state["upload_call_entered"] = upload_call_entered
         if not upload_call_entered:
@@ -1003,12 +1066,21 @@ def deploy_bundle(
     finally:
         entered_marker.unlink(missing_ok=True)
         child_result.unlink(missing_ok=True)
+        main_guard_result.unlink(missing_ok=True)
     if mutation_state.get("upload_call_entered") is True:
         mutation_boundary["status"] = "MUTATION_BOUNDARY_CROSSED"
         result_path.write_bytes(canonical_json(mutation_boundary))
     mutation_state["known_hf_revision"] = target_sha
+    post_mutation_main = _require_public_main_revision(
+        source_sha,
+        deadline=mutation_deadline,
+    )
+    mutation_state["post_mutation_main"] = post_mutation_main
+    pre_mutation_main = mutation_state.get("pre_mutation_main")
+    if not _public_main_readback_is_exact(pre_mutation_main, source_sha):
+        raise RuntimeError("pre-mutation public main evidence is incomplete")
     result = {
-        "schema": "szl.hf-deploy-result/v1",
+        "schema": "szl.hf-deploy-result/v3",
         "status": "PUBLISHED_AWAITING_ATTESTATION",
         "source_revision": source_sha,
         "previous_hf_revision": before_sha,
@@ -1016,6 +1088,9 @@ def deploy_bundle(
         "bundle_sha256": manifest["bundle_sha256"],
         "target": HF_REPO,
         "authorization": mutation_authorization,
+        "authorized_input_manifest_sha256": input_manifest_sha256,
+        "pre_mutation_main": pre_mutation_main,
+        "post_mutation_main": post_mutation_main,
     }
     result_path.write_bytes(canonical_json(result))
     return result
@@ -1512,14 +1587,49 @@ def attest_publication(
     result_path: Path,
     attestation_path: Path,
     *,
+    authorization_path: Path,
+    event_path: Path,
+    authorization_output_path: Path,
+    authorization_failure_output_path: Path,
+    authorized_input_root: Path | None = None,
+    authorized_input_manifest_sha256: str | None = None,
     timeout: int = ATTEST_TIMEOUT_SECONDS,
     deadline: float | None = None,
 ) -> dict[str, object]:
+    _require_measurement_privilege_domain()
     source_sha = exact_sha(source_sha, "workflow source")
     manifest = validate_bundle(bundle, source_sha)
+    authorization = GOVERNANCE.load_governed_merge(authorization_path, source_sha)
+    if (authorized_input_root is None) != (authorized_input_manifest_sha256 is None):
+        raise RuntimeError("authorized input root and manifest digest must be supplied together")
+    if authorized_input_root is not None and authorized_input_manifest_sha256 is not None:
+        validate_authorized_input(
+            authorized_input_root,
+            source_sha,
+            authorized_input_manifest_sha256,
+        )
     result = json.loads(result_path.read_text(encoding="utf-8"))
-    if result.get("source_revision") != source_sha or result.get("target") != HF_REPO:
+    if (
+        result.get("schema") != "szl.hf-deploy-result/v3"
+        or result.get("status") != "PUBLISHED_AWAITING_ATTESTATION"
+        or result.get("source_revision") != source_sha
+        or result.get("target") != HF_REPO
+    ):
         raise RuntimeError("deployment result is not bound to this source and target")
+    result_manifest_sha256 = result.get("authorized_input_manifest_sha256")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(result_manifest_sha256 or "")):
+        raise RuntimeError("deployment result authorized input digest is malformed")
+    if (
+        authorized_input_manifest_sha256 is not None
+        and result_manifest_sha256 != authorized_input_manifest_sha256
+    ):
+        raise RuntimeError("deployment result authorized input digest differs")
+    if not _public_main_readback_is_exact(result.get("pre_mutation_main"), source_sha):
+        raise RuntimeError("deployment result lacks exact pre-mutation main evidence")
+    if not _public_main_readback_is_exact(result.get("post_mutation_main"), source_sha):
+        raise RuntimeError("deployment result lacks exact post-mutation main evidence")
+    if result.get("authorization") != authorization:
+        raise RuntimeError("deployment result authorization is not canonical and exact")
     target_sha = exact_sha(result.get("hf_revision"), "deployment result revision")
     previous_sha = exact_sha(
         result.get("previous_hf_revision"),
@@ -1586,10 +1696,21 @@ def attest_publication(
         source_sha,
     )
 
-    post_publication_main = require_governed_main(source_sha, deadline=deadline)
+    post_publication_main = GOVERNANCE.require_governed_main(
+        source_sha,
+        event_path,
+        authorization_output_path,
+        failure_output_path=authorization_failure_output_path,
+        deadline=deadline,
+    )
+    if (
+        GOVERNANCE.governed_merge_core(post_publication_main, source_sha)
+        != GOVERNANCE.governed_merge_core(authorization, source_sha)
+    ):
+        raise RuntimeError("post-publication governed-merge tuple changed")
 
     attestation = {
-        "schema": "szl.hf-live-attestation/v2",
+        "schema": "szl.hf-live-attestation/v4",
         "status": "MEASURED",
         "receipt_minted": False,
         "deployment_success": False,
@@ -1612,6 +1733,10 @@ def attest_publication(
             "relation": provenance["source"]["relation"],
             "verified": True,
         },
+        "authorization": authorization,
+        "authorized_input_manifest_sha256": result_manifest_sha256,
+        "pre_mutation_main": result["pre_mutation_main"],
+        "post_mutation_main": result["post_mutation_main"],
         "post_publication_main": post_publication_main,
         "target": HF_REPO,
     }
@@ -1636,6 +1761,12 @@ def write_failure_evidence(
     published_revision = (
         mutation_state.get("known_hf_revision") if mutation_state else None
     )
+    pre_mutation_main = mutation_state.get("pre_mutation_main") if mutation_state else None
+    post_mutation_main = mutation_state.get("post_mutation_main") if mutation_state else None
+    if not _public_main_readback_is_exact(pre_mutation_main, source_sha):
+        pre_mutation_main = None
+    if not _public_main_readback_is_exact(post_mutation_main, source_sha):
+        post_mutation_main = None
     if not (isinstance(published_revision, str) and HEX40.fullmatch(published_revision)):
         published_revision = None
     if result_path.is_file():
@@ -1643,7 +1774,7 @@ def write_failure_evidence(
             persisted = json.loads(result_path.read_text(encoding="utf-8"))
             if (
                 isinstance(persisted, dict)
-                and persisted.get("schema") == "szl.hf-deploy-result/v1"
+                and persisted.get("schema") == "szl.hf-deploy-result/v3"
                 and persisted.get("source_revision") == source_sha
                 and persisted.get("target") == HF_REPO
             ):
@@ -1672,7 +1803,7 @@ def write_failure_evidence(
     path.write_bytes(
         canonical_json(
             {
-                "schema": "szl.hf-deploy-failure/v2",
+                "schema": "szl.hf-deploy-failure/v3",
                 "status": status,
                 "receipt_minted": False,
                 "measured": False,
@@ -1683,6 +1814,8 @@ def write_failure_evidence(
                 "source_revision": source_sha,
                 "source_relation": SOURCE_RELATION,
                 "hf_revision": published_revision,
+                "pre_mutation_main": pre_mutation_main,
+                "post_mutation_main": post_mutation_main,
                 "error_type": type(error).__name__,
                 "error": message,
                 "target": HF_REPO,
@@ -1718,6 +1851,8 @@ def validate_deployment_failure_receipt(
         "source_revision",
         "source_relation",
         "hf_revision",
+        "pre_mutation_main",
+        "post_mutation_main",
         "error_type",
         "error",
         "target",
@@ -1726,7 +1861,7 @@ def validate_deployment_failure_receipt(
         raise RuntimeError("required failed-deployment receipt fields are not exact")
     if payload != canonical_json(value):
         raise RuntimeError("required failed-deployment receipt is not canonical JSON")
-    if value.get("schema") != "szl.hf-deploy-failure/v2":
+    if value.get("schema") != "szl.hf-deploy-failure/v3":
         raise RuntimeError("required failed-deployment receipt schema is not exact")
     if value.get("status") not in {
         "FAILED_BEFORE_MUTATION",
@@ -1761,6 +1896,18 @@ def validate_deployment_failure_receipt(
         raise RuntimeError("partial failed-deployment receipt lacks its mutation marker")
     if value["status"] != "PARTIAL_AFTER_MUTATION" and revision is not None:
         raise RuntimeError("failed-deployment receipt revision contradicts its status")
+    pre_mutation_main = value.get("pre_mutation_main")
+    post_mutation_main = value.get("post_mutation_main")
+    if pre_mutation_main is not None and not _public_main_readback_is_exact(
+        pre_mutation_main, source_sha
+    ):
+        raise RuntimeError("failed-deployment pre-mutation main evidence is invalid")
+    if post_mutation_main is not None and not _public_main_readback_is_exact(
+        post_mutation_main, source_sha
+    ):
+        raise RuntimeError("failed-deployment post-mutation main evidence is invalid")
+    if value["status"] == "FAILED_BEFORE_MUTATION" and post_mutation_main is not None:
+        raise RuntimeError("failed-before-mutation receipt has post-mutation evidence")
     if value["status"] == "FAILED_BEFORE_MUTATION" and value["upload_call_entered"]:
         raise RuntimeError("failed-before-mutation receipt contradicts its mutation marker")
     if (
@@ -1789,16 +1936,27 @@ def write_workflow_stage_failure(
     receipt_path: Path,
     *,
     failure_stage: str,
-    artifact_outcome: str,
+    publisher_artifact_outcome: str | None = None,
+    measurement_artifact_outcome: str | None = None,
     candidate_receipt_outcome: str,
     oidc_outcome: str,
     finalize_receipt_outcome: str = "skipped",
     terminal_artifact_outcome: str = "skipped",
     cleanup_complete: bool = True,
+    artifact_outcome: str | None = None,
 ) -> dict[str, object]:
     source_sha = exact_sha(source_sha, "workflow source")
+    if measurement_artifact_outcome is None:
+        measurement_artifact_outcome = artifact_outcome
+    if publisher_artifact_outcome is None:
+        publisher_artifact_outcome = "success"
+    if measurement_artifact_outcome is None:
+        raise RuntimeError("measurement artifact outcome is required")
     if failure_stage not in {
-        "SUCCESS_ARTIFACT_UPLOAD",
+        "PUBLISHER_MUTATION",
+        "PUBLIC_MEASUREMENT",
+        "PUBLISHER_EVIDENCE_TRANSPORT",
+        "MEASUREMENT_EVIDENCE_TRANSPORT",
         "CANDIDATE_RECEIPT_SYNTHESIS",
         "OIDC_RECEIPT_ATTESTATION",
         "FINAL_RECEIPT_PROMOTION",
@@ -1834,7 +1992,7 @@ def write_workflow_stage_failure(
         return value if value in STEP_OUTCOMES else "unknown"
 
     evidence = {
-        "schema": "szl.hf-receipt-stage-failure/v3",
+        "schema": "szl.hf-receipt-stage-failure/v4",
         "status": (
             "FAILED_AFTER_LOCAL_MEASUREMENT"
             if measurement_valid
@@ -1847,7 +2005,8 @@ def write_workflow_stage_failure(
         "source_revision": source_sha,
         "source_relation": SOURCE_RELATION,
         "target": HF_REPO,
-        "artifact_upload_outcome": sanitized_outcome(artifact_outcome),
+        "publisher_artifact_outcome": sanitized_outcome(publisher_artifact_outcome),
+        "measurement_artifact_outcome": sanitized_outcome(measurement_artifact_outcome),
         "candidate_receipt_outcome": sanitized_outcome(candidate_receipt_outcome),
         "oidc_attestation_outcome": sanitized_outcome(oidc_outcome),
         "finalize_receipt_outcome": sanitized_outcome(finalize_receipt_outcome),
@@ -1998,8 +2157,10 @@ def _success_contract_violations(
         else:
             expected_index = matches[0]
 
-    if result.get("schema") != "szl.hf-deploy-result/v1":
+    if result.get("schema") != "szl.hf-deploy-result/v3":
         violations.append("result.schema")
+    if result.get("status") != "PUBLISHED_AWAITING_ATTESTATION":
+        violations.append("result.status")
     if result.get("source_revision") != source_sha:
         violations.append("result.source_revision")
     if result.get("target") != HF_REPO:
@@ -2013,10 +2174,20 @@ def _success_contract_violations(
         r"[0-9a-f]{64}", result_bundle
     ):
         violations.append("result.bundle_sha256")
+    result_authorization = result.get("authorization")
+    if not GOVERNANCE.governed_merge_is_exact(result_authorization, source_sha):
+        violations.append("result.authorization")
+    result_input_manifest = result.get("authorized_input_manifest_sha256")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(result_input_manifest or "")):
+        violations.append("result.authorized_input_manifest_sha256")
+    if not _public_main_readback_is_exact(result.get("pre_mutation_main"), source_sha):
+        violations.append("result.pre_mutation_main")
+    if not _public_main_readback_is_exact(result.get("post_mutation_main"), source_sha):
+        violations.append("result.post_mutation_main")
 
     if measurement_bytes != canonical_json(measurement):
         violations.append("measurement.canonical_json")
-    if measurement.get("schema") != "szl.hf-live-attestation/v2":
+    if measurement.get("schema") != "szl.hf-live-attestation/v4":
         violations.append("measurement.schema")
     if measurement.get("status") != "MEASURED":
         violations.append("measurement.status")
@@ -2066,14 +2237,30 @@ def _success_contract_violations(
             violations.append("cross.public_index_normalized_sha256")
     if manifest is not None and file_count != _manifest_contract_file_count(manifest, bundle=bundle):
         violations.append("cross.file_count_manifest")
+    measurement_authorization = measurement.get("authorization")
+    if measurement_authorization != result_authorization:
+        violations.append("cross.authorization")
+    if not GOVERNANCE.governed_merge_is_exact(
+        measurement_authorization, source_sha
+    ):
+        violations.append("measurement.authorization")
+    if measurement.get("authorized_input_manifest_sha256") != result_input_manifest:
+        violations.append("cross.authorized_input_manifest_sha256")
+    if measurement.get("pre_mutation_main") != result.get("pre_mutation_main"):
+        violations.append("cross.pre_mutation_main")
+    if measurement.get("post_mutation_main") != result.get("post_mutation_main"):
+        violations.append("cross.post_mutation_main")
+    if not _public_main_readback_is_exact(measurement.get("pre_mutation_main"), source_sha):
+        violations.append("measurement.pre_mutation_main")
+    if not _public_main_readback_is_exact(measurement.get("post_mutation_main"), source_sha):
+        violations.append("measurement.post_mutation_main")
     post_publication_main = measurement.get("post_publication_main")
-    expected_post_publication_main = {
-        "status": GOVERNED_MAIN_STATUS,
-        "source_revision": source_sha,
-        "ruleset_ids": [GOVERNED_RULESET_ID],
-    }
-    if post_publication_main != expected_post_publication_main:
+    if not GOVERNANCE.governed_merge_is_exact(post_publication_main, source_sha):
         violations.append("measurement.post_publication_main_authorized")
+    elif GOVERNANCE.governed_merge_core(
+        post_publication_main, source_sha
+    ) != GOVERNANCE.governed_merge_core(result_authorization, source_sha):
+        violations.append("cross.post_publication_governed_merge")
     public_provenance = measurement.get("public_provenance")
     if not isinstance(public_provenance, dict):
         violations.append("measurement.public_provenance")
@@ -2118,7 +2305,7 @@ def _canonical_success_receipt(
     receipt = dict(measurement)
     receipt.update(
         {
-            "schema": "szl.hf-oidc-receipt/v2",
+            "schema": "szl.hf-oidc-receipt/v4",
             "status": "OIDC_ATTESTED_DEPLOYMENT",
             "measurement": {
                 "path": measurement_path.name,
@@ -2228,25 +2415,64 @@ def require_deployment_failure_artifact(
     receipt_outcome: str,
     primary_outcome: str,
     retry_outcome: str,
+    aggregate_outcome: str | None = None,
 ) -> None:
     if not required:
         return
+    if aggregate_outcome is None:
+        aggregate_outcome = (
+            "success"
+            if primary_outcome == "success" or retry_outcome == "success"
+            else "failure"
+        )
     if (
         receipt_outcome not in STEP_OUTCOMES
         or primary_outcome not in STEP_OUTCOMES
         or retry_outcome not in STEP_OUTCOMES
+        or aggregate_outcome not in STEP_OUTCOMES
     ):
         raise RuntimeError("failed-deployment artifact outcome is malformed")
     if receipt_outcome != "success":
         raise RuntimeError("required failed-deployment receipt validation did not succeed")
     if primary_outcome != "success" and retry_outcome != "success":
         raise RuntimeError("failed-deployment evidence was not preserved")
+    if aggregate_outcome != "success":
+        raise RuntimeError("failed-deployment aggregate artifact outcome did not succeed")
+
+
+def classify_terminal_failure_stage(
+    *,
+    publish_outcome: str,
+    publisher_artifact_outcome: str,
+    measurement_outcome: str,
+    measurement_artifact_outcome: str,
+    candidate_receipt_outcome: str,
+    oidc_outcome: str,
+    finalize_receipt_outcome: str,
+    terminal_artifact_outcome: str,
+) -> str | None:
+    ordered = (
+        (publish_outcome, "PUBLISHER_MUTATION"),
+        (publisher_artifact_outcome, "PUBLISHER_EVIDENCE_TRANSPORT"),
+        (measurement_outcome, "PUBLIC_MEASUREMENT"),
+        (measurement_artifact_outcome, "MEASUREMENT_EVIDENCE_TRANSPORT"),
+        (candidate_receipt_outcome, "CANDIDATE_RECEIPT_SYNTHESIS"),
+        (oidc_outcome, "OIDC_RECEIPT_ATTESTATION"),
+        (finalize_receipt_outcome, "FINAL_RECEIPT_PROMOTION"),
+        (terminal_artifact_outcome, "TERMINAL_SUCCESS_ARTIFACT"),
+    )
+    for outcome, stage in ordered:
+        if outcome != "success":
+            return stage
+    return None
 
 
 def enforce_terminal_evidence(
     *,
     publish_outcome: str,
-    artifact_outcome: str,
+    publisher_artifact_outcome: str | None = None,
+    measurement_outcome: str = "success",
+    measurement_artifact_outcome: str | None = None,
     candidate_receipt_outcome: str,
     oidc_outcome: str,
     finalize_receipt_outcome: str,
@@ -2257,10 +2483,19 @@ def enforce_terminal_evidence(
     deployment_failure_receipt_outcome: str = "skipped",
     deployment_failure_artifact_primary_outcome: str,
     deployment_failure_artifact_retry_outcome: str,
+    artifact_outcome: str | None = None,
 ) -> dict[str, object]:
+    if measurement_artifact_outcome is None:
+        measurement_artifact_outcome = artifact_outcome
+    if publisher_artifact_outcome is None:
+        publisher_artifact_outcome = "success"
+    if measurement_artifact_outcome is None:
+        raise RuntimeError("measurement artifact outcome is required")
     success_path = {
         "publish": publish_outcome,
-        "local_artifact": artifact_outcome,
+        "publisher_artifact": publisher_artifact_outcome,
+        "measurement": measurement_outcome,
+        "measurement_artifact": measurement_artifact_outcome,
         "candidate_receipt": candidate_receipt_outcome,
         "oidc_attestation": oidc_outcome,
         "receipt_promotion": finalize_receipt_outcome,
@@ -2294,6 +2529,7 @@ def enforce_terminal_evidence(
         deployment_failure_receipt_outcome,
         deployment_failure_artifact_primary_outcome,
         deployment_failure_artifact_retry_outcome,
+        publisher_artifact_outcome,
     )
     failed = [name for name, outcome in success_path.items() if outcome != "success"]
     if failed:
@@ -2319,22 +2555,37 @@ def stage_failure_main(argv: list[str]) -> int:
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--failure-evidence", type=Path, required=True)
-    parser.add_argument("--failure-stage", required=True)
-    parser.add_argument("--artifact-outcome", required=True)
+    parser.add_argument("--publish-outcome", required=True)
+    parser.add_argument("--publisher-artifact-outcome", required=True)
+    parser.add_argument("--measurement-outcome", required=True)
+    parser.add_argument("--measurement-artifact-outcome", required=True)
     parser.add_argument("--candidate-receipt-outcome", required=True)
     parser.add_argument("--oidc-outcome", required=True)
     parser.add_argument("--finalize-receipt-outcome", required=True)
     parser.add_argument("--terminal-artifact-outcome", required=True)
     parser.add_argument("--cleanup-path", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
+    failure_stage = classify_terminal_failure_stage(
+        publish_outcome=args.publish_outcome,
+        publisher_artifact_outcome=args.publisher_artifact_outcome,
+        measurement_outcome=args.measurement_outcome,
+        measurement_artifact_outcome=args.measurement_artifact_outcome,
+        candidate_receipt_outcome=args.candidate_receipt_outcome,
+        oidc_outcome=args.oidc_outcome,
+        finalize_receipt_outcome=args.finalize_receipt_outcome,
+        terminal_artifact_outcome=args.terminal_artifact_outcome,
+    )
+    if failure_stage is None:
+        raise RuntimeError("workflow failure synthesis was requested for a success graph")
     cleanup_complete = cleanup_terminal_success_files(args.cleanup_path)
     evidence = write_workflow_stage_failure(
         args.failure_evidence,
         args.source_sha,
         args.result,
         args.receipt,
-        failure_stage=args.failure_stage,
-        artifact_outcome=args.artifact_outcome,
+        failure_stage=failure_stage,
+        publisher_artifact_outcome=args.publisher_artifact_outcome,
+        measurement_artifact_outcome=args.measurement_artifact_outcome,
         candidate_receipt_outcome=args.candidate_receipt_outcome,
         oidc_outcome=args.oidc_outcome,
         finalize_receipt_outcome=args.finalize_receipt_outcome,
@@ -2399,7 +2650,9 @@ def enforce_terminal_main(argv: list[str]) -> int:
     _require_workflow_terminal_budget()
     parser = argparse.ArgumentParser()
     parser.add_argument("--publish-outcome", required=True)
-    parser.add_argument("--artifact-outcome", required=True)
+    parser.add_argument("--publisher-artifact-outcome", required=True)
+    parser.add_argument("--measurement-outcome", required=True)
+    parser.add_argument("--measurement-artifact-outcome", required=True)
     parser.add_argument("--candidate-receipt-outcome", required=True)
     parser.add_argument("--oidc-outcome", required=True)
     parser.add_argument("--finalize-receipt-outcome", required=True)
@@ -2444,6 +2697,111 @@ def bounded_action_main(argv: list[str]) -> int:
     return 0
 
 
+def guard_main(argv: list[str]) -> int:
+    _require_authorization_privilege_domain()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--event", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--failure-output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    evidence = GOVERNANCE.require_governed_main(
+        args.source_sha,
+        args.event,
+        args.output,
+        failure_output_path=args.failure_output,
+    )
+    print(json.dumps(evidence, sort_keys=True))
+    return 0
+
+
+def seal_input_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    manifest = seal_authorized_input(args.root, args.source_sha, args.output)
+    print(
+        json.dumps(
+            {
+                "manifest": manifest,
+                "manifest_sha256": sha256_file(args.output),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def publish_main(argv: list[str]) -> int:
+    _require_workflow_terminal_budget()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--authorization", type=Path, required=True)
+    parser.add_argument("--authorized-input-root", type=Path, required=True)
+    parser.add_argument("--authorized-input-manifest-sha256", required=True)
+    parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument("--failure-evidence", type=Path, required=True)
+    args = parser.parse_args(argv)
+    source_sha = exact_sha(args.source_sha, "workflow source")
+    mutation_state: dict[str, object] = {}
+    try:
+        result = deploy_bundle(
+            args.bundle,
+            source_sha,
+            args.result,
+            mutation_state,
+            authorization_path=args.authorization,
+            authorized_input_root=args.authorized_input_root,
+            authorized_input_manifest_sha256=args.authorized_input_manifest_sha256,
+            deadline=_workflow_operation_deadline(),
+        )
+    except Exception as error:
+        write_failure_evidence(
+            args.failure_evidence,
+            source_sha,
+            error,
+            args.result,
+            mutation_state,
+        )
+        raise
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def measure_main(argv: list[str]) -> int:
+    _require_workflow_terminal_budget()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--authorization", type=Path, required=True)
+    parser.add_argument("--authorized-input-root", type=Path, required=True)
+    parser.add_argument("--authorized-input-manifest-sha256", required=True)
+    parser.add_argument("--event", type=Path, required=True)
+    parser.add_argument("--authorization-output", type=Path, required=True)
+    parser.add_argument("--authorization-failure-output", type=Path, required=True)
+    parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument("--measurement", type=Path, required=True)
+    args = parser.parse_args(argv)
+    evidence = attest_publication(
+        args.bundle,
+        args.source_sha,
+        args.result,
+        args.measurement,
+        authorization_path=args.authorization,
+        event_path=args.event,
+        authorization_output_path=args.authorization_output,
+        authorization_failure_output_path=args.authorization_failure_output,
+        authorized_input_root=args.authorized_input_root,
+        authorized_input_manifest_sha256=args.authorized_input_manifest_sha256,
+        deadline=_workflow_operation_deadline(),
+    )
+    print(json.dumps(evidence, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "upload-child":
         return upload_child_main(sys.argv[2:])
@@ -2459,42 +2817,17 @@ def main() -> int:
         return validate_deployment_failure_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "bounded-action":
         return bounded_action_main(sys.argv[2:])
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bundle", type=Path, required=True)
-    parser.add_argument("--source-sha", required=True)
-    parser.add_argument("--result", type=Path, required=True)
-    parser.add_argument("--attestation", type=Path, required=True)
-    parser.add_argument("--failure-evidence", type=Path, required=True)
-    args = parser.parse_args()
-    source_sha = exact_sha(args.source_sha, "workflow source")
-    operation_deadline = _workflow_operation_deadline()
-    mutation_state: dict[str, object] = {}
-    try:
-        deploy_bundle(
-            args.bundle,
-            source_sha,
-            args.result,
-            mutation_state,
-            deadline=operation_deadline,
-        )
-        attestation = attest_publication(
-            args.bundle,
-            source_sha,
-            args.result,
-            args.attestation,
-            deadline=operation_deadline,
-        )
-    except Exception as error:
-        write_failure_evidence(
-            args.failure_evidence,
-            source_sha,
-            error,
-            args.result,
-            mutation_state,
-        )
-        raise
-    print(json.dumps(attestation, sort_keys=True))
-    return 0
+    if len(sys.argv) > 1 and sys.argv[1] == "guard":
+        return guard_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "seal-input":
+        return seal_input_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "publish":
+        return publish_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "measure":
+        return measure_main(sys.argv[2:])
+    raise SystemExit(
+        "an explicit subcommand is required; combined governance/HF execution is forbidden"
+    )
 
 
 if __name__ == "__main__":
