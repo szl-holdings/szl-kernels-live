@@ -740,7 +740,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/kernel-authorized-input"
           python -I -P scripts/deploy_hf_space.py bounded-action \
-            --action upload --reserve-seconds 60 --max-seconds 60
+            --action upload --reserve-seconds 120 --max-seconds 60
       - name: Preserve terminal failure evidence retry
         id: receipt-stage-failure-artifact-retry
         if: always() && steps.receipt-stage-failure.outcome == 'success' && steps.receipt-stage-failure-artifact-primary.outcome != 'success'
