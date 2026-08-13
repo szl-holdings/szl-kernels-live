@@ -194,11 +194,16 @@ The main-branch release path has four step-isolated credential domains:
    main revision. The Hugging Face, OIDC, and Actions runtime credentials are
    explicitly absent from the measurement interpreter.
 4. **Attest:** GitHub OIDC and attestation permissions only. OIDC is exposed
-   only to the bounded attestation runtime, while Actions artifact credentials
-   are exposed only to bounded evidence-upload runtimes. It can mint a
+   only to the commit-pinned official build-provenance action, while Actions
+   artifact credentials are exposed only to bounded evidence-upload runtimes.
+   A separate GitHub-API-, HF-, and OIDC-credential-free `always()` job uses
+   only the runner's bounded same-run artifact channel to preserve failure
+   evidence if the attestation action exhausts its job timeout. It
+   independently revalidates the canonical candidate instead of trusting
+   outputs from the timed-out job. The attestation job can mint a
    terminal receipt only from exact authorization, mutation, public
    measurement, and post-publication authorization evidence. The Hugging Face
-   credential is explicitly absent.
+   credential is explicitly absent from both attestation jobs.
 
 Validation is standard-library-only and does not install publisher
 dependencies. Publication dependencies remain hash-pinned in the isolated

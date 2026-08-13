@@ -461,6 +461,8 @@ jobs:
     if: always() && needs.authorize.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      oidc_completed: ${{ steps.oidc-completion.outputs.complete }}
     permissions:
       attestations: write
       contents: read
@@ -574,6 +576,24 @@ jobs:
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: ${{ runner.temp }}/kernel-terminal-candidate/hf-canonical-success-receipt.json
+      - name: Record terminal attestation action completion
+        id: oidc-completion
+        if: always()
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+          OIDC_ACTION_OUTCOME: ${{ steps.oidc-receipt.outcome }}
+        shell: bash
+        run: |
+          case "$OIDC_ACTION_OUTCOME" in
+            success|failure|skipped|cancelled) ;;
+            *) exit 1 ;;
+          esac
+          printf 'complete=true\n' >> "$GITHUB_OUTPUT"
       - name: Promote attested receipt and bind metadata envelope
         id: finalize-receipt
         if: steps.oidc-receipt.outcome == 'success'
@@ -770,3 +790,216 @@ jobs:
             --deployment-failure-receipt-outcome "${{ needs.measure.outputs.failure_receipt_outcome }}" \
             --deployment-failure-artifact-primary-outcome "${{ needs.deploy.outputs.artifact_primary_outcome }}" \
             --deployment-failure-artifact-retry-outcome "${{ needs.deploy.outputs.artifact_retry_outcome }}"
+
+  attest-timeout-fallback:
+    name: preserve-attestation-timeout-evidence
+    needs: [authorize, deploy, measure, attest]
+    if: >-
+      always() && needs.authorize.result == 'success' &&
+      needs.attest.outputs.oidc_completed != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    env:
+      GITHUB_TOKEN: ""
+      GH_TOKEN: ""
+      HF_TOKEN: ""
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        with:
+          python-version: "3.12.13"
+          token: ""
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        with:
+          node-version: "24.19.0"
+          token: ""
+      - name: Download sealed authorized input
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        with:
+          name: ${{ needs.authorize.outputs.artifact_name }}
+          path: ${{ runner.temp }}/kernel-authorized-input
+      - name: Verify sealed authorized input before fallback code execution
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+          EXPECTED_MANIFEST_SHA256: ${{ needs.authorize.outputs.input_manifest_sha256 }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -P - "$RUNNER_TEMP/kernel-authorized-input" "$EXPECTED_MANIFEST_SHA256" "$SOURCE_SHA" <<'PY'
+          import hashlib,json,pathlib,re,sys
+          root=pathlib.Path(sys.argv[1]).resolve(); expected=sys.argv[2]; source=sys.argv[3]
+          canonical=lambda value:(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n").encode()
+          manifest_path=root/"authorized-input-manifest.json"; raw=manifest_path.read_bytes()
+          if any(path.is_symlink() for path in root.rglob("*")): raise SystemExit("authorized input contains a symbolic path")
+          if not re.fullmatch(r"[0-9a-f]{64}",expected) or hashlib.sha256(raw).hexdigest()!=expected: raise SystemExit("authorized input manifest digest differs")
+          manifest=json.loads(raw)
+          if raw!=canonical(manifest) or set(manifest)!={"schema","source_revision","file_count","files","tree_sha256"}: raise SystemExit("authorized input manifest contract differs")
+          if manifest["schema"]!="szl.kernel-authorized-input/v1" or manifest["source_revision"]!=source or manifest["file_count"]!=len(manifest["files"]): raise SystemExit("authorized input identity differs")
+          observed=set()
+          for row in manifest["files"]:
+              if set(row)!={"path","bytes","sha256"}: raise SystemExit("authorized input entry differs")
+              rel=pathlib.PurePosixPath(row["path"])
+              if rel.is_absolute() or ".." in rel.parts or any(part.startswith(".") for part in rel.parts) or rel.as_posix() in observed: raise SystemExit("authorized input path is unsafe")
+              observed.add(rel.as_posix()); path=root.joinpath(*rel.parts)
+              if path.is_symlink() or not path.is_file() or path.stat().st_size!=row["bytes"]: raise SystemExit("authorized input file differs")
+              if not re.fullmatch(r"[0-9a-f]{64}",row["sha256"]) or hashlib.sha256(path.read_bytes()).hexdigest()!=row["sha256"]: raise SystemExit("authorized input file digest differs")
+          actual={path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and path!=manifest_path}
+          if actual!=observed or manifest["tree_sha256"]!=hashlib.sha256(canonical(manifest["files"])).hexdigest(): raise SystemExit("authorized input tree is not closed")
+          PY
+      - name: Download publisher outcome for timeout evidence
+        continue-on-error: true
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        with:
+          pattern: kernel-publisher-outcome-*-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kernel-publisher-outcome
+          merge-multiple: true
+      - name: Download measurement outcome for timeout evidence
+        continue-on-error: true
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        with:
+          pattern: kernel-measurement-outcome-*-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kernel-measurement-outcome
+          merge-multiple: true
+      - name: Record bounded timeout-evidence deadline
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          printf 'HF_TERMINAL_DEADLINE_EPOCH=%s\n' "$(($(date +%s) + 480))" >> "$GITHUB_ENV"
+      - name: Revalidate canonical candidate after attestation timeout
+        id: timeout-candidate
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          mkdir -p "$RUNNER_TEMP/kernel-timeout-candidate"
+          python -I -P "$input/scripts/deploy_hf_space.py" candidate-receipt \
+            --source-sha "${{ needs.authorize.outputs.source_sha }}" \
+            --bundle "$input/bundle" \
+            --result "$RUNNER_TEMP/kernel-publisher-outcome/hf-deploy-result.json" \
+            --measurement "$RUNNER_TEMP/kernel-measurement-outcome/hf-live-attestation.json" \
+            --output "$RUNNER_TEMP/kernel-timeout-candidate/hf-canonical-success-receipt.json"
+      - name: Synthesize attestation-timeout failure evidence
+        id: timeout-failure
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P "$input/scripts/deploy_hf_space.py" stage-failure \
+            --source-sha "${{ needs.authorize.outputs.source_sha }}" \
+            --result "$RUNNER_TEMP/kernel-publisher-outcome/hf-deploy-result.json" \
+            --receipt "$RUNNER_TEMP/kernel-measurement-outcome/hf-live-attestation.json" \
+            --failure-evidence "$RUNNER_TEMP/hf-attestation-timeout-failure.json" \
+            --publish-outcome "${{ needs.deploy.outputs.publish_outcome }}" \
+            --publisher-artifact-outcome "${{ needs.deploy.outputs.artifact_outcome }}" \
+            --measurement-outcome "${{ needs.measure.outputs.measurement_outcome }}" \
+            --measurement-artifact-outcome "${{ needs.measure.outputs.artifact_outcome }}" \
+            --candidate-receipt-outcome "${{ steps.timeout-candidate.outcome }}" \
+            --oidc-outcome "${{ needs.attest.result }}" \
+            --finalize-receipt-outcome skipped \
+            --terminal-artifact-outcome skipped \
+            --cleanup-path "$RUNNER_TEMP/kernel-timeout-candidate/hf-canonical-success-receipt.json"
+      - name: Preserve attestation-timeout evidence primary
+        id: timeout-artifact-primary
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          DEADLINE_ACTION_INPUT_NAME: kernel-attestation-timeout-primary-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: ${{ runner.temp }}/hf-attestation-timeout-failure.json
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 120 --max-seconds 60
+      - name: Preserve attestation-timeout evidence retry
+        id: timeout-artifact-retry
+        if: steps.timeout-artifact-primary.outcome != 'success'
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          DEADLINE_ACTION_INPUT_NAME: kernel-attestation-timeout-retry-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: ${{ runner.temp }}/hf-attestation-timeout-failure.json
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 60 --max-seconds 45
+      - name: Enforce attestation-timeout evidence preservation
+        if: always()
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          if [ "${{ steps.timeout-failure.outcome }}" != "success" ]; then
+            exit 1
+          fi
+          if [ "${{ steps.timeout-artifact-primary.outcome }}" != "success" ] && \
+             [ "${{ steps.timeout-artifact-retry.outcome }}" != "success" ]; then
+            exit 1
+          fi
