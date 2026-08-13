@@ -571,27 +571,9 @@ jobs:
         id: oidc-receipt
         if: steps.candidate-receipt.outcome == 'success'
         continue-on-error: true
-        env:
-          DEADLINE_ACTION_INPUT_SUBJECT_PATH: ${{ runner.temp }}/kernel-terminal-candidate/hf-canonical-success-receipt.json
-          DEADLINE_ACTION_INPUT_SUBJECT_DIGEST: ""
-          DEADLINE_ACTION_INPUT_SUBJECT_NAME: ""
-          DEADLINE_ACTION_INPUT_SUBJECT_CHECKSUMS: ""
-          DEADLINE_ACTION_INPUT_PREDICATE_TYPE: ""
-          DEADLINE_ACTION_INPUT_PREDICATE: ""
-          DEADLINE_ACTION_INPUT_PREDICATE_PATH: ""
-          DEADLINE_ACTION_INPUT_PUSH_TO_REGISTRY: "false"
-          DEADLINE_ACTION_INPUT_CREATE_STORAGE_RECORD: "true"
-          DEADLINE_ACTION_GITHUB_CREDENTIAL: ${{ github.token }}
-          DEADLINE_ACTION_INPUT_SHOW_SUMMARY: "true"
-          ACTIONS_RUNTIME_TOKEN: ""
-          ACTIONS_RUNTIME_URL: ""
-          ACTIONS_RESULTS_URL: ""
-          ACTIONS_CACHE_URL: ""
-        shell: bash
-        run: |
-          cd "$RUNNER_TEMP/kernel-authorized-input"
-          python -I -P scripts/deploy_hf_space.py bounded-action \
-            --action attest-build-provenance --reserve-seconds 300 --max-seconds 180
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ${{ runner.temp }}/kernel-terminal-candidate/hf-canonical-success-receipt.json
       - name: Promote attested receipt and bind metadata envelope
         id: finalize-receipt
         if: steps.oidc-receipt.outcome == 'success'

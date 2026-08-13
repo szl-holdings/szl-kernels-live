@@ -715,7 +715,7 @@ class GovernedMergeContractTests(unittest.TestCase):
         self.assertIn('HF_TOKEN: ""', attest)
         self.assertNotIn("secrets.HF_TOKEN", attest)
         self.assertNotIn(".terminal-actions", release)
-        self.assertIn("terminal-actions/attest/dist/index.js", release)
+        self.assertIn("actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32", release)
         self.assertIn("authorized-input-manifest.json", release)
         self.assertIn("input_manifest_sha256", release)
         self.assertIn("Verify sealed authorized input", release)
