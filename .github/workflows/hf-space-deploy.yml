@@ -462,7 +462,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     outputs:
-      oidc_completed: ${{ steps.oidc-completion.outputs.complete }}
+      terminal_evidence_completed: ${{ steps.terminal-evidence-completion.outputs.complete }}
     permissions:
       attestations: write
       contents: read
@@ -576,24 +576,6 @@ jobs:
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: ${{ runner.temp }}/kernel-terminal-candidate/hf-canonical-success-receipt.json
-      - name: Record terminal attestation action completion
-        id: oidc-completion
-        if: always()
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
-          ACTIONS_ID_TOKEN_REQUEST_URL: ""
-          ACTIONS_RUNTIME_TOKEN: ""
-          ACTIONS_RUNTIME_URL: ""
-          ACTIONS_RESULTS_URL: ""
-          ACTIONS_CACHE_URL: ""
-          OIDC_ACTION_OUTCOME: ${{ steps.oidc-receipt.outcome }}
-        shell: bash
-        run: |
-          case "$OIDC_ACTION_OUTCOME" in
-            success|failure|skipped|cancelled) ;;
-            *) exit 1 ;;
-          esac
-          printf 'complete=true\n' >> "$GITHUB_OUTPUT"
       - name: Promote attested receipt and bind metadata envelope
         id: finalize-receipt
         if: steps.oidc-receipt.outcome == 'success'
@@ -790,13 +772,25 @@ jobs:
             --deployment-failure-receipt-outcome "${{ needs.measure.outputs.failure_receipt_outcome }}" \
             --deployment-failure-artifact-primary-outcome "${{ needs.deploy.outputs.artifact_primary_outcome }}" \
             --deployment-failure-artifact-retry-outcome "${{ needs.deploy.outputs.artifact_retry_outcome }}"
+      - name: Record terminal evidence completion
+        id: terminal-evidence-completion
+        if: success()
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: printf 'complete=true\n' >> "$GITHUB_OUTPUT"
 
   attest-timeout-fallback:
     name: preserve-attestation-timeout-evidence
     needs: [authorize, deploy, measure, attest]
     if: >-
       always() && needs.authorize.result == 'success' &&
-      needs.attest.outputs.oidc_completed != 'true'
+      needs.attest.outputs.terminal_evidence_completed != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}

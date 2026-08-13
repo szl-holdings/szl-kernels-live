@@ -13,7 +13,7 @@ class HfSpaceWorkflowContractTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         step = workflow.split(
             "- name: Attest canonical final success receipt bytes", 1
-        )[1].split("- name: Record terminal attestation action completion", 1)[0]
+        )[1].split("- name: Promote attested receipt and bind metadata envelope", 1)[0]
 
         self.assertEqual(
             workflow.count(
@@ -47,18 +47,25 @@ class HfSpaceWorkflowContractTests(unittest.TestCase):
         fallback = workflow.split("  attest-timeout-fallback:\n", 1)[1]
 
         self.assertIn(
-            "oidc_completed: ${{ steps.oidc-completion.outputs.complete }}",
+            "terminal_evidence_completed: "
+            "${{ steps.terminal-evidence-completion.outputs.complete }}",
             attest,
         )
         self.assertLess(
             attest.index("uses: actions/attest-build-provenance@"),
-            attest.index("id: oidc-completion"),
+            attest.index("id: terminal-evidence-completion"),
+        )
+        self.assertLess(
+            attest.index("- name: Enforce terminal publication evidence"),
+            attest.index("id: terminal-evidence-completion"),
         )
         self.assertIn("needs: [authorize, deploy, measure, attest]", fallback)
         self.assertIn(
-            "needs.attest.outputs.oidc_completed != 'true'",
+            "needs.attest.outputs.terminal_evidence_completed != 'true'",
             fallback,
         )
+        self.assertNotIn("oidc_completed", workflow)
+        self.assertNotIn("id: oidc-completion", workflow)
         self.assertNotIn("candidate_outcome:", attest)
         self.assertIn("id: timeout-candidate", fallback)
         self.assertIn("candidate-receipt", fallback)
