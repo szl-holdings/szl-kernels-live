@@ -6,78 +6,785 @@ on:
 
 permissions:
   contents: read
-  id-token: write
-  attestations: write
+
+concurrency:
+  group: hf-space-deploy-${{ github.repository }}-production
+  cancel-in-progress: false
 
 jobs:
-  deploy:
+  authorize:
+    name: authorize-exact-governed-merge
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      artifact_name: ${{ steps.seal-input.outputs.artifact_name }}
+      input_manifest_sha256: ${{ steps.seal-input.outputs.manifest_sha256 }}
+      transport_artifact_digest: ${{ steps.authorized-input-upload.outputs.artifact-digest }}
     steps:
       - name: Checkout exact protected-main event
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.11"
-      - name: Install pinned Hugging Face client without credentials
-        run: python -m pip install --disable-pip-version-check huggingface-hub==1.19.0
-      - name: Verify checked kernel contracts
-        run: |
-          python scripts/verify_kernel_registry.py
-          python -m unittest discover -s tests -v
-          node --test tests/test_kernel_portfolio_truth.mjs
-      - name: Build source-bound Space bundle
-        run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          python scripts/build_hf_space_bundle.py \
-            --output "$RUNNER_TEMP/hf-bundle" \
-            --source-sha "$GITHUB_SHA" \
-            > "$RUNNER_TEMP/hf-bundle-result.json"
-      - name: Attest deployment manifest
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+          python-version: "3.12.13"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          subject-path: ${{ runner.temp }}/hf-bundle/hf-deploy-manifest.json
-      - name: Reauthorize exact protected main before credential use
-        env:
-          GH_TOKEN: ${{ github.token }}
+          node-version: "24.19.0"
+      - name: Bind exact source revision
+        id: source
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = "refs/heads/main"
-          live_sha="$(
-            curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
-              --header "Authorization: Bearer $GH_TOKEN" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/branches/main" \
-              | python -c 'import json,sys; data=json.load(sys.stdin); data.get("protected") is True or sys.exit("main is not protected"); print(data["commit"]["sha"])'
-          )"
-          test "$live_sha" = "$GITHUB_SHA"
-          printf 'Protected main remains exact at %s\n' "$live_sha"
-      - name: Publish exact protected-main bundle
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf 'sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - name: Verify zero-dependency kernel contracts
+        shell: bash
         run: |
           set -euo pipefail
-          test -n "$HF_TOKEN"
-          python scripts/deploy_hf_space.py \
-            --bundle "$RUNNER_TEMP/hf-bundle" \
+          test "$(python -I -P -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')" = "3.12.13"
+          python -I -P scripts/verify_kernel_registry.py
+          python -I -P -c \
+            'import pathlib,sys,unittest; root=pathlib.Path.cwd().resolve(); sys.path.insert(0,str(root)); result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover(str(root / "tests"))); raise SystemExit(not result.wasSuccessful())'
+          node --test tests/test_kernel_portfolio_truth.mjs
+      - name: Build exact source-bound bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -P scripts/build_hf_space_bundle.py \
+            --output "$RUNNER_TEMP/hf-bundle" \
             --source-sha "$GITHUB_SHA" \
-            --result "$RUNNER_TEMP/hf-deploy-result.json" \
-            --attestation "$RUNNER_TEMP/hf-live-attestation.json"
-      - name: Upload immutable deployment evidence
-        if: always()
+            > "$RUNNER_TEMP/hf-bundle-result.json"
+      - name: Mint canonical governed-merge authorization
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -P scripts/deploy_hf_space.py guard \
+            --source-sha "$GITHUB_SHA" \
+            --event "$GITHUB_EVENT_PATH" \
+            --output "$RUNNER_TEMP/governed-merge.json" \
+            --failure-output "$RUNNER_TEMP/governed-merge-failure.json"
+      - name: Fetch pinned build-provenance wrapper before mutation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: actions/attest-build-provenance
+          ref: a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+          path: .authorized-actions/attest-build-provenance
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch pinned bounded attestation runtime before mutation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: actions/attest
+          ref: 59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+          path: .authorized-actions/attest
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch pinned bounded artifact runtime before mutation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: actions/upload-artifact
+          ref: 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          path: .authorized-actions/upload-artifact
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Stage and seal immutable authorized input
+        id: seal-input
+        shell: bash
+        run: |
+          set -euo pipefail
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          install -d "$input/scripts" "$input/requirements" \
+            "$input/terminal-actions/attest-build-provenance" \
+            "$input/terminal-actions/attest/dist" \
+            "$input/terminal-actions/upload-artifact/dist/upload"
+          cp -a "$RUNNER_TEMP/hf-bundle" "$input/bundle"
+          install -m 0644 scripts/deploy_hf_space.py "$input/scripts/deploy_hf_space.py"
+          install -m 0644 scripts/github_governed_merge.py "$input/scripts/github_governed_merge.py"
+          install -m 0644 requirements/hf-publisher.lock "$input/requirements/hf-publisher.lock"
+          install -m 0644 "$RUNNER_TEMP/governed-merge.json" "$input/governed-merge.json"
+          install -m 0644 "$GITHUB_EVENT_PATH" "$input/push-event.json"
+          install -m 0644 .authorized-actions/attest-build-provenance/action.yml \
+            "$input/terminal-actions/attest-build-provenance/action.yml"
+          install -m 0644 .authorized-actions/attest/dist/index.js \
+            "$input/terminal-actions/attest/dist/index.js"
+          install -m 0644 .authorized-actions/upload-artifact/dist/upload/index.js \
+            "$input/terminal-actions/upload-artifact/dist/upload/index.js"
+          seal_result="$(python -I -P scripts/deploy_hf_space.py seal-input \
+            --root "$input" \
+            --source-sha "$GITHUB_SHA" \
+            --output "$input/authorized-input-manifest.json")"
+          manifest_sha="$(printf '%s' "$seal_result" | python -I -P -c \
+            'import json,sys; print(json.load(sys.stdin)["manifest_sha256"])')"
+          artifact_name="kernel-authorized-input-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'manifest_sha256=%s\n' "$manifest_sha" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$artifact_name" >> "$GITHUB_OUTPUT"
+      - name: Upload immutable authorized publisher input
+        id: authorized-input-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hf-space-deployment-evidence
-          path: |
-            ${{ runner.temp }}/hf-bundle/hf-deploy-manifest.json
-            ${{ runner.temp }}/hf-bundle/SPACE_PROVENANCE.json
+          name: ${{ steps.seal-input.outputs.artifact_name }}
+          path: ${{ runner.temp }}/kernel-authorized-input
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 7
+
+  deploy:
+    name: publish-exact-protected-main
+    needs: authorize
+    if: needs.authorize.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {}
+    outputs:
+      publish_outcome: ${{ steps.publish.outcome }}
+      artifact_outcome: ${{ steps.publisher-artifact-gate.outputs.outcome }}
+      artifact_primary_outcome: ${{ steps.publisher-artifact-primary.outcome }}
+      artifact_retry_outcome: ${{ steps.publisher-artifact-retry.outcome }}
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12.13"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+      - name: Download immutable authorized publisher input
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: ${{ needs.authorize.outputs.artifact_name }}
+          path: ${{ runner.temp }}/kernel-authorized-input
+      - name: Verify sealed authorized input before code or dependency use
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.authorize.outputs.input_manifest_sha256 }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -P - "$RUNNER_TEMP/kernel-authorized-input" "$EXPECTED_MANIFEST_SHA256" "$SOURCE_SHA" <<'PY'
+          import hashlib,json,pathlib,re,sys
+          root=pathlib.Path(sys.argv[1]).resolve(); expected=sys.argv[2]; source=sys.argv[3]
+          canonical=lambda value:(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n").encode()
+          manifest_path=root/"authorized-input-manifest.json"; raw=manifest_path.read_bytes()
+          if any(path.is_symlink() for path in root.rglob("*")): raise SystemExit("authorized input contains a symbolic path")
+          if not re.fullmatch(r"[0-9a-f]{64}",expected) or hashlib.sha256(raw).hexdigest()!=expected: raise SystemExit("authorized input manifest digest differs")
+          manifest=json.loads(raw)
+          if raw!=canonical(manifest) or set(manifest)!={"schema","source_revision","file_count","files","tree_sha256"}: raise SystemExit("authorized input manifest contract differs")
+          if manifest["schema"]!="szl.kernel-authorized-input/v1" or manifest["source_revision"]!=source or manifest["file_count"]!=len(manifest["files"]): raise SystemExit("authorized input identity differs")
+          observed=set()
+          for row in manifest["files"]:
+              if set(row)!={"path","bytes","sha256"}: raise SystemExit("authorized input entry differs")
+              rel=pathlib.PurePosixPath(row["path"])
+              if rel.is_absolute() or ".." in rel.parts or any(part.startswith(".") for part in rel.parts) or rel.as_posix() in observed: raise SystemExit("authorized input path is unsafe")
+              observed.add(rel.as_posix()); path=root.joinpath(*rel.parts)
+              if path.is_symlink() or not path.is_file() or path.stat().st_size!=row["bytes"]: raise SystemExit("authorized input file differs")
+              if not re.fullmatch(r"[0-9a-f]{64}",row["sha256"]) or hashlib.sha256(path.read_bytes()).hexdigest()!=row["sha256"]: raise SystemExit("authorized input file digest differs")
+          actual={path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and path!=manifest_path}
+          if actual!=observed or manifest["tree_sha256"]!=hashlib.sha256(canonical(manifest["files"])).hexdigest(): raise SystemExit("authorized input tree is not closed")
+          PY
+      - name: Create isolated hash-closed HF publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -P -m venv "$RUNNER_TEMP/hf-publisher-venv"
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --only-binary=:all: \
+            --ignore-installed \
+            -r "$RUNNER_TEMP/kernel-authorized-input/requirements/hf-publisher.lock"
+      - name: Record bounded publisher evidence deadline
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'HF_TERMINAL_DEADLINE_EPOCH=%s\n' "$(($(date +%s) + 900))" >> "$GITHUB_ENV"
+      - name: Publish authorized bundle without GitHub or OIDC credentials
+        id: publish
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+          GOVERNANCE_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          test -n "$HF_TOKEN"
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P "$input/scripts/deploy_hf_space.py" publish \
+            --bundle "$input/bundle" \
+             --source-sha "${{ needs.authorize.outputs.source_sha }}" \
+             --authorization "$input/governed-merge.json" \
+             --authorized-input-root "$input" \
+             --authorized-input-manifest-sha256 "${{ needs.authorize.outputs.input_manifest_sha256 }}" \
+             --result "$RUNNER_TEMP/hf-deploy-result.json" \
+            --failure-evidence "$RUNNER_TEMP/hf-deploy-failure.json"
+      - name: Preserve publisher outcome primary
+        id: publisher-artifact-primary
+        if: always()
+        continue-on-error: true
+        env:
+          DEADLINE_ACTION_INPUT_NAME: kernel-publisher-outcome-primary-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: |
             ${{ runner.temp }}/hf-deploy-result.json
+            ${{ runner.temp }}/hf-deploy-failure.json
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 120 --max-seconds 120
+      - name: Preserve publisher outcome retry
+        id: publisher-artifact-retry
+        if: always() && steps.publisher-artifact-primary.outcome != 'success'
+        continue-on-error: true
+        env:
+          DEADLINE_ACTION_INPUT_NAME: kernel-publisher-outcome-retry-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: |
+            ${{ runner.temp }}/hf-deploy-result.json
+            ${{ runner.temp }}/hf-deploy-failure.json
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          "$RUNNER_TEMP/hf-publisher-venv/bin/python" -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 60 --max-seconds 60
+      - name: Classify publisher artifact preservation
+        id: publisher-artifact-gate
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.publisher-artifact-primary.outcome }}" = "success" ] || \
+             [ "${{ steps.publisher-artifact-retry.outcome }}" = "success" ]; then
+            printf 'outcome=success\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'outcome=failure\n' >> "$GITHUB_OUTPUT"
+          fi
+
+  measure:
+    name: measure-and-reauthorize-publication
+    needs: [authorize, deploy]
+    if: always() && needs.authorize.result == 'success' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      measurement_outcome: ${{ steps.measure.outcome }}
+      failure_receipt_outcome: ${{ steps.deployment-failure-receipt.outcome }}
+      artifact_outcome: ${{ steps.measurement-artifact-gate.outputs.outcome }}
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12.13"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: ${{ needs.authorize.outputs.artifact_name }}
+          path: ${{ runner.temp }}/kernel-authorized-input
+      - name: Verify sealed authorized input before artifact code execution
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.authorize.outputs.input_manifest_sha256 }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -P - "$RUNNER_TEMP/kernel-authorized-input" "$EXPECTED_MANIFEST_SHA256" "$SOURCE_SHA" <<'PY'
+          import hashlib,json,pathlib,re,sys
+          root=pathlib.Path(sys.argv[1]).resolve(); expected=sys.argv[2]; source=sys.argv[3]
+          canonical=lambda value:(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n").encode()
+          manifest_path=root/"authorized-input-manifest.json"; raw=manifest_path.read_bytes()
+          if any(path.is_symlink() for path in root.rglob("*")): raise SystemExit("authorized input contains a symbolic path")
+          if not re.fullmatch(r"[0-9a-f]{64}",expected) or hashlib.sha256(raw).hexdigest()!=expected: raise SystemExit("authorized input manifest digest differs")
+          manifest=json.loads(raw)
+          if raw!=canonical(manifest) or set(manifest)!={"schema","source_revision","file_count","files","tree_sha256"}: raise SystemExit("authorized input manifest contract differs")
+          if manifest["schema"]!="szl.kernel-authorized-input/v1" or manifest["source_revision"]!=source or manifest["file_count"]!=len(manifest["files"]): raise SystemExit("authorized input identity differs")
+          observed=set()
+          for row in manifest["files"]:
+              if set(row)!={"path","bytes","sha256"}: raise SystemExit("authorized input entry differs")
+              rel=pathlib.PurePosixPath(row["path"])
+              if rel.is_absolute() or ".." in rel.parts or any(part.startswith(".") for part in rel.parts) or rel.as_posix() in observed: raise SystemExit("authorized input path is unsafe")
+              observed.add(rel.as_posix()); path=root.joinpath(*rel.parts)
+              if path.is_symlink() or not path.is_file() or path.stat().st_size!=row["bytes"]: raise SystemExit("authorized input file differs")
+              if not re.fullmatch(r"[0-9a-f]{64}",row["sha256"]) or hashlib.sha256(path.read_bytes()).hexdigest()!=row["sha256"]: raise SystemExit("authorized input file digest differs")
+          actual={path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and path!=manifest_path}
+          if actual!=observed or manifest["tree_sha256"]!=hashlib.sha256(canonical(manifest["files"])).hexdigest(): raise SystemExit("authorized input tree is not closed")
+          PY
+      - name: Download preserved publisher outcome
+        continue-on-error: true
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          pattern: kernel-publisher-outcome-*-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kernel-publisher-outcome
+          merge-multiple: true
+      - name: Record bounded measurement evidence deadline
+        shell: bash
+        run: |
+          printf 'HF_TERMINAL_DEADLINE_EPOCH=%s\n' "$(($(date +%s) + 2100))" >> "$GITHUB_ENV"
+      - name: Measure public bytes and reauthorize exact main
+        id: measure
+        if: needs.deploy.outputs.publish_outcome == 'success'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ""
+          GOVERNANCE_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+          HF_TOKEN: ""
+        shell: bash
+        run: |
+          set -euo pipefail
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P "$input/scripts/deploy_hf_space.py" measure \
+            --bundle "$input/bundle" \
+             --source-sha "${{ needs.authorize.outputs.source_sha }}" \
+             --authorization "$input/governed-merge.json" \
+             --authorized-input-root "$input" \
+             --authorized-input-manifest-sha256 "${{ needs.authorize.outputs.input_manifest_sha256 }}" \
+             --event "$input/push-event.json" \
+            --authorization-output "$RUNNER_TEMP/governed-merge-post.json" \
+            --authorization-failure-output "$RUNNER_TEMP/governed-merge-post-failure.json" \
+            --result "$RUNNER_TEMP/kernel-publisher-outcome/hf-deploy-result.json" \
+            --measurement "$RUNNER_TEMP/hf-live-attestation.json"
+      - name: Validate exact failed-deployment receipt
+        id: deployment-failure-receipt
+        if: needs.deploy.outputs.publish_outcome != 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P "$input/scripts/deploy_hf_space.py" validate-deployment-failure \
+            --source-sha "${{ needs.authorize.outputs.source_sha }}" \
+            --failure-evidence "$RUNNER_TEMP/kernel-publisher-outcome/hf-deploy-failure.json"
+      - name: Preserve measurement outcome primary
+        id: measurement-artifact-primary
+        if: always()
+        continue-on-error: true
+        env:
+          DEADLINE_ACTION_INPUT_NAME: kernel-measurement-outcome-primary-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: |
             ${{ runner.temp }}/hf-live-attestation.json
-          if-no-files-found: warn
-          retention-days: 90
+            ${{ runner.temp }}/governed-merge-post.json
+            ${{ runner.temp }}/governed-merge-post-failure.json
+            ${{ runner.temp }}/kernel-publisher-outcome/hf-deploy-failure.json
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 120 --max-seconds 120
+      - name: Preserve measurement outcome retry
+        id: measurement-artifact-retry
+        if: always() && steps.measurement-artifact-primary.outcome != 'success'
+        continue-on-error: true
+        env:
+          DEADLINE_ACTION_INPUT_NAME: kernel-measurement-outcome-retry-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: |
+            ${{ runner.temp }}/hf-live-attestation.json
+            ${{ runner.temp }}/governed-merge-post.json
+            ${{ runner.temp }}/governed-merge-post-failure.json
+            ${{ runner.temp }}/kernel-publisher-outcome/hf-deploy-failure.json
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 60 --max-seconds 60
+      - name: Classify measurement artifact preservation
+        id: measurement-artifact-gate
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.measurement-artifact-primary.outcome }}" = "success" ] || \
+             [ "${{ steps.measurement-artifact-retry.outcome }}" = "success" ]; then
+            printf 'outcome=success\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'outcome=failure\n' >> "$GITHUB_OUTPUT"
+          fi
+
+  attest:
+    name: attest-terminal-publication-evidence
+    needs: [authorize, deploy, measure]
+    if: always() && needs.authorize.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      GITHUB_TOKEN: ""
+      GH_TOKEN: ""
+      HF_TOKEN: ""
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        with:
+          python-version: "3.12.13"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        with:
+          node-version: "24.19.0"
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        with:
+          name: ${{ needs.authorize.outputs.artifact_name }}
+          path: ${{ runner.temp }}/kernel-authorized-input
+      - name: Verify sealed authorized input before artifact code execution
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          EXPECTED_MANIFEST_SHA256: ${{ needs.authorize.outputs.input_manifest_sha256 }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -P - "$RUNNER_TEMP/kernel-authorized-input" "$EXPECTED_MANIFEST_SHA256" "$SOURCE_SHA" <<'PY'
+          import hashlib,json,pathlib,re,sys
+          root=pathlib.Path(sys.argv[1]).resolve(); expected=sys.argv[2]; source=sys.argv[3]
+          canonical=lambda value:(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n").encode()
+          manifest_path=root/"authorized-input-manifest.json"; raw=manifest_path.read_bytes()
+          if any(path.is_symlink() for path in root.rglob("*")): raise SystemExit("authorized input contains a symbolic path")
+          if not re.fullmatch(r"[0-9a-f]{64}",expected) or hashlib.sha256(raw).hexdigest()!=expected: raise SystemExit("authorized input manifest digest differs")
+          manifest=json.loads(raw)
+          if raw!=canonical(manifest) or set(manifest)!={"schema","source_revision","file_count","files","tree_sha256"}: raise SystemExit("authorized input manifest contract differs")
+          if manifest["schema"]!="szl.kernel-authorized-input/v1" or manifest["source_revision"]!=source or manifest["file_count"]!=len(manifest["files"]): raise SystemExit("authorized input identity differs")
+          observed=set()
+          for row in manifest["files"]:
+              if set(row)!={"path","bytes","sha256"}: raise SystemExit("authorized input entry differs")
+              rel=pathlib.PurePosixPath(row["path"])
+              if rel.is_absolute() or ".." in rel.parts or any(part.startswith(".") for part in rel.parts) or rel.as_posix() in observed: raise SystemExit("authorized input path is unsafe")
+              observed.add(rel.as_posix()); path=root.joinpath(*rel.parts)
+              if path.is_symlink() or not path.is_file() or path.stat().st_size!=row["bytes"]: raise SystemExit("authorized input file differs")
+              if not re.fullmatch(r"[0-9a-f]{64}",row["sha256"]) or hashlib.sha256(path.read_bytes()).hexdigest()!=row["sha256"]: raise SystemExit("authorized input file digest differs")
+          actual={path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and path!=manifest_path}
+          if actual!=observed or manifest["tree_sha256"]!=hashlib.sha256(canonical(manifest["files"])).hexdigest(): raise SystemExit("authorized input tree is not closed")
+          PY
+      - name: Download publisher outcome
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        continue-on-error: true
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          pattern: kernel-publisher-outcome-*-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kernel-publisher-outcome
+          merge-multiple: true
+      - name: Download measurement outcome
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        continue-on-error: true
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          pattern: kernel-measurement-outcome-*-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kernel-measurement-outcome
+          merge-multiple: true
+      - name: Record bounded attestation evidence deadline
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        shell: bash
+        run: |
+          printf 'HF_TERMINAL_DEADLINE_EPOCH=%s\n' "$(($(date +%s) + 1200))" >> "$GITHUB_ENV"
+      - name: Synthesize canonical success receipt candidate
+        id: candidate-receipt
+        if: needs.deploy.outputs.publish_outcome == 'success' && needs.measure.outputs.measurement_outcome == 'success'
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          mkdir -p "$RUNNER_TEMP/kernel-terminal-candidate"
+          python -I -P "$input/scripts/deploy_hf_space.py" candidate-receipt \
+            --source-sha "${{ needs.authorize.outputs.source_sha }}" \
+            --bundle "$input/bundle" \
+            --result "$RUNNER_TEMP/kernel-publisher-outcome/hf-deploy-result.json" \
+            --measurement "$RUNNER_TEMP/kernel-measurement-outcome/hf-live-attestation.json" \
+            --output "$RUNNER_TEMP/kernel-terminal-candidate/hf-canonical-success-receipt.json"
+      - name: Attest canonical final success receipt bytes
+        id: oidc-receipt
+        if: steps.candidate-receipt.outcome == 'success'
+        continue-on-error: true
+        env:
+          DEADLINE_ACTION_INPUT_SUBJECT_PATH: ${{ runner.temp }}/kernel-terminal-candidate/hf-canonical-success-receipt.json
+          DEADLINE_ACTION_INPUT_SUBJECT_DIGEST: ""
+          DEADLINE_ACTION_INPUT_SUBJECT_NAME: ""
+          DEADLINE_ACTION_INPUT_SUBJECT_CHECKSUMS: ""
+          DEADLINE_ACTION_INPUT_PREDICATE_TYPE: ""
+          DEADLINE_ACTION_INPUT_PREDICATE: ""
+          DEADLINE_ACTION_INPUT_PREDICATE_PATH: ""
+          DEADLINE_ACTION_INPUT_PUSH_TO_REGISTRY: "false"
+          DEADLINE_ACTION_INPUT_CREATE_STORAGE_RECORD: "true"
+          DEADLINE_ACTION_GITHUB_CREDENTIAL: ${{ github.token }}
+          DEADLINE_ACTION_INPUT_SHOW_SUMMARY: "true"
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P scripts/deploy_hf_space.py bounded-action \
+            --action attest-build-provenance --reserve-seconds 300 --max-seconds 180
+      - name: Promote attested receipt and bind metadata envelope
+        id: finalize-receipt
+        if: steps.oidc-receipt.outcome == 'success'
+        continue-on-error: true
+        env:
+          ATTESTATION_ID: ${{ steps.oidc-receipt.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.oidc-receipt.outputs.attestation-url }}
+          ATTESTATION_BUNDLE_PATH: ${{ steps.oidc-receipt.outputs.bundle-path }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          test -n "$ATTESTATION_ID"
+          test -n "$ATTESTATION_URL"
+          test -f "$ATTESTATION_BUNDLE_PATH"
+          python -I -P "$input/scripts/deploy_hf_space.py" finalize-receipt \
+            --source-sha "${{ needs.authorize.outputs.source_sha }}" \
+            --bundle "$input/bundle" \
+            --result "$RUNNER_TEMP/kernel-publisher-outcome/hf-deploy-result.json" \
+            --measurement "$RUNNER_TEMP/kernel-measurement-outcome/hf-live-attestation.json" \
+            --candidate "$RUNNER_TEMP/kernel-terminal-candidate/hf-canonical-success-receipt.json" \
+            --output "$RUNNER_TEMP/hf-canonical-success-receipt.json" \
+            --envelope "$RUNNER_TEMP/hf-oidc-attestation-envelope.json" \
+            --attestation-id "$ATTESTATION_ID" \
+            --attestation-url "$ATTESTATION_URL" \
+            --bundle-path "$ATTESTATION_BUNDLE_PATH"
+      - name: Preserve terminal success evidence primary
+        id: terminal-success-artifact-primary
+        if: steps.finalize-receipt.outcome == 'success'
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          DEADLINE_ACTION_INPUT_NAME: kernel-terminal-success-primary-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: |
+            ${{ runner.temp }}/hf-canonical-success-receipt.json
+            ${{ runner.temp }}/hf-oidc-attestation-envelope.json
+            ${{ steps.oidc-receipt.outputs.bundle-path }}
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 120 --max-seconds 120
+      - name: Preserve terminal success evidence retry
+        id: terminal-success-artifact-retry
+        if: steps.finalize-receipt.outcome == 'success' && steps.terminal-success-artifact-primary.outcome != 'success'
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          DEADLINE_ACTION_INPUT_NAME: kernel-terminal-success-retry-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: |
+            ${{ runner.temp }}/hf-canonical-success-receipt.json
+            ${{ runner.temp }}/hf-oidc-attestation-envelope.json
+            ${{ steps.oidc-receipt.outputs.bundle-path }}
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 60 --max-seconds 60
+      - name: Classify terminal success artifact
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        id: terminal-success-artifact
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.terminal-success-artifact-primary.outcome }}" = "success" ] || \
+             [ "${{ steps.terminal-success-artifact-retry.outcome }}" = "success" ]; then
+            printf 'outcome=success\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'outcome=failure\n' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Synthesize terminal failure evidence
+        id: receipt-stage-failure
+        if: >-
+          always() && (needs.deploy.outputs.publish_outcome != 'success' ||
+          needs.deploy.outputs.artifact_outcome != 'success' ||
+          needs.measure.outputs.measurement_outcome != 'success' ||
+          needs.measure.outputs.artifact_outcome != 'success' ||
+          steps.candidate-receipt.outcome != 'success' ||
+          steps.oidc-receipt.outcome != 'success' ||
+          steps.finalize-receipt.outcome != 'success' ||
+          steps.terminal-success-artifact.outputs.outcome != 'success')
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P "$input/scripts/deploy_hf_space.py" stage-failure \
+             --source-sha "${{ needs.authorize.outputs.source_sha }}" \
+             --result "$RUNNER_TEMP/kernel-publisher-outcome/hf-deploy-result.json" \
+             --receipt "$RUNNER_TEMP/kernel-measurement-outcome/hf-live-attestation.json" \
+             --failure-evidence "$RUNNER_TEMP/hf-receipt-stage-failure.json" \
+             --publish-outcome "${{ needs.deploy.outputs.publish_outcome }}" \
+             --publisher-artifact-outcome "${{ needs.deploy.outputs.artifact_outcome }}" \
+             --measurement-outcome "${{ needs.measure.outputs.measurement_outcome }}" \
+             --measurement-artifact-outcome "${{ needs.measure.outputs.artifact_outcome }}" \
+             --candidate-receipt-outcome "${{ steps.candidate-receipt.outcome }}" \
+            --oidc-outcome "${{ steps.oidc-receipt.outcome }}" \
+            --finalize-receipt-outcome "${{ steps.finalize-receipt.outcome }}" \
+            --terminal-artifact-outcome "${{ steps.terminal-success-artifact.outputs.outcome }}" \
+            --cleanup-path "$RUNNER_TEMP/kernel-terminal-candidate/hf-canonical-success-receipt.json" \
+            --cleanup-path "$RUNNER_TEMP/hf-canonical-success-receipt.json" \
+            --cleanup-path "$RUNNER_TEMP/hf-oidc-attestation-envelope.json"
+      - name: Preserve terminal failure evidence primary
+        id: receipt-stage-failure-artifact-primary
+        if: always() && steps.receipt-stage-failure.outcome == 'success'
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          DEADLINE_ACTION_INPUT_NAME: kernel-terminal-failure-primary-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: ${{ runner.temp }}/hf-receipt-stage-failure.json
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 120 --max-seconds 60
+      - name: Preserve terminal failure evidence retry
+        id: receipt-stage-failure-artifact-retry
+        if: always() && steps.receipt-stage-failure.outcome == 'success' && steps.receipt-stage-failure-artifact-primary.outcome != 'success'
+        continue-on-error: true
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          DEADLINE_ACTION_INPUT_NAME: kernel-terminal-failure-retry-${{ needs.authorize.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEADLINE_ACTION_INPUT_PATH: ${{ runner.temp }}/hf-receipt-stage-failure.json
+          DEADLINE_ACTION_INPUT_IF_NO_FILES_FOUND: error
+          DEADLINE_ACTION_INPUT_RETENTION_DAYS: "1"
+          DEADLINE_ACTION_INPUT_COMPRESSION_LEVEL: "6"
+          DEADLINE_ACTION_INPUT_OVERWRITE: "false"
+          DEADLINE_ACTION_INPUT_INCLUDE_HIDDEN_FILES: "false"
+          DEADLINE_ACTION_INPUT_ARCHIVE: "true"
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P scripts/deploy_hf_space.py bounded-action \
+            --action upload --reserve-seconds 60 --max-seconds 45
+      - name: Enforce terminal publication evidence
+        if: always()
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_RUNTIME_TOKEN: ""
+          ACTIONS_RUNTIME_URL: ""
+          ACTIONS_RESULTS_URL: ""
+          ACTIONS_CACHE_URL: ""
+        shell: bash
+        run: |
+          input="$RUNNER_TEMP/kernel-authorized-input"
+          python -I -P "$input/scripts/deploy_hf_space.py" enforce-terminal \
+             --publish-outcome "${{ needs.deploy.outputs.publish_outcome }}" \
+             --publisher-artifact-outcome "${{ needs.deploy.outputs.artifact_outcome }}" \
+             --measurement-outcome "${{ needs.measure.outputs.measurement_outcome }}" \
+             --measurement-artifact-outcome "${{ needs.measure.outputs.artifact_outcome }}" \
+            --candidate-receipt-outcome "${{ steps.candidate-receipt.outcome }}" \
+            --oidc-outcome "${{ steps.oidc-receipt.outcome }}" \
+            --finalize-receipt-outcome "${{ steps.finalize-receipt.outcome }}" \
+            --terminal-artifact-outcome "${{ steps.terminal-success-artifact.outputs.outcome }}" \
+            --failure-synthesis-outcome "${{ steps.receipt-stage-failure.outcome }}" \
+            --failure-artifact-primary-outcome "${{ steps.receipt-stage-failure-artifact-primary.outcome }}" \
+            --failure-artifact-retry-outcome "${{ steps.receipt-stage-failure-artifact-retry.outcome }}" \
+            --deployment-failure-receipt-outcome "${{ needs.measure.outputs.failure_receipt_outcome }}" \
+            --deployment-failure-artifact-primary-outcome "${{ needs.deploy.outputs.artifact_primary_outcome }}" \
+            --deployment-failure-artifact-retry-outcome "${{ needs.deploy.outputs.artifact_retry_outcome }}"
